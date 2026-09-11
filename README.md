@@ -170,11 +170,19 @@ restarts. `:rules` shows them.
 The grammar is a construction grammar, not a parser with a linguistics
 department behind it. It handles arithmetic, collections, attributes of
 people and things, comparatives, wh-questions, yes/no questions with
-subject-aux inversion, imperatives, pronouns across turns, and definitions. It
-will not handle relative clauses, coordination inside arguments, tense, or
-most of the ways a real sentence can go. When it misses, it says so rather
-than guessing, which is the tradeoff: a model-backed ears module would
-understand far more and be confidently wrong far more often.
+subject-aux inversion, imperatives, modals, pronouns across turns, and
+definitions. It will not handle relative clauses, coordination inside
+arguments, tense, or most of the ways a real sentence can go. When it misses,
+it says so rather than guessing, which is the tradeoff: a model-backed ears
+module would understand far more and be confidently wrong far more often.
+
+Saying so accurately matters more than it sounds. A sentence Soup parsed but
+cannot answer gets "i don't know what the time is"; only a sentence it truly
+could not parse gets "i didn't catch that". Blaming the speaker for a hole in
+your own vocabulary is the most annoying thing a program can do.
+
+The clock is the one thing Soup reads from outside its own memory, because
+"i don't know what time it is" is a silly answer.
 
 Memory is closed-world and flat. "does Bob like Alice" answers "i don't know"
 rather than "no", which is correct but chattier than people expect.

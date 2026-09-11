@@ -527,6 +527,9 @@ class Heard:
     source: str
     construction: str = ""
     confidence: float = 1.0
+    # Literal words the winning construction consumed. Zero means every word
+    # was poured into a slot, so the shape is a guess rather than a match.
+    literals: int = 0
 
     @property
     def understood(self) -> bool:
@@ -574,7 +577,7 @@ class Ears:
         if not self.toks:
             return Heard(call("Unintelligible"), raw)
 
-        best: Optional[Tuple[int, Expr, str]] = None
+        best: Optional[Tuple[int, Expr, str, int]] = None
         for c in self.constructions:
             if c.needs_question is True and not (self.question or self._question_word()):
                 continue
@@ -588,13 +591,13 @@ class Ears:
                     continue
                 score = literals * 10 + c.bonus
                 if best is None or score > best[0]:
-                    best = (score, built, c.pattern)
+                    best = (score, built, c.pattern, literals)
                 break
 
         if best is not None:
             self._commit_observations(best[1])
             self.discourse.note_meaning(best[1])
-            return Heard(best[1], raw, best[2])
+            return Heard(best[1], raw, best[2], literals=best[3])
 
         fallback = self._desperate_parse()
         if fallback is not None:
@@ -1320,6 +1323,10 @@ def _build_constructions() -> List[Construction]:
     add("(see) (you|ya) [later]", lambda b, e: call("Farewell"))
     add("(thanks|thank|thx|ty) [you]", lambda b, e: call("Thanks"))
     add("(how) (are) (you|ya) [doing]", lambda b, e: call("Question", about=call("State", subject=call("Assistant"))))
+    add("(howsit|sup|wassup|whassup|whatsup|howdy)", lambda b, e: _how_are_you())
+    add("(how) (you) (doing|been)", lambda b, e: _how_are_you())
+    add("(how) (is|are) (it|things|everything|life) [going]", lambda b, e: _how_are_you())
+    add("(how) (is) (it) (going|hanging)", lambda b, e: _how_are_you())
     add("(what) (is) (up)", lambda b, e: call("Greeting"))
     add("(yes|yeah|correct|right|sure|ok|okay)", lambda b, e: call("Affirm"))
     add("(no|nope|wrong|incorrect)", lambda b, e: call("Deny"))
@@ -1467,6 +1474,35 @@ def _build_constructions() -> List[Construction]:
         "(what) (about) {v:value}",
         lambda b, e: call("Question", about=b["v"]),
     )
+
+    # -- the clock ---------------------------------------------------------
+    add("(what) (time) (is) (it) [now]", lambda b, e: call("Question", about=call("Time")))
+    add("(what) (day) (is) (it) [today]", lambda b, e: call("Question", about=call("Day")))
+    add("(what) (is) (today)", lambda b, e: call("Question", about=call("Date")))
+    add("(what) (year) (is) (it)", lambda b, e: call("Question", about=call("Year")))
+    add("(do) (you) (know) (what) (time) (it) (is)", lambda b, e: call("Question", about=call("Time")))
+
+    # -- what someone can do -----------------------------------------------
+    # "i can drive" is a fact about the world, "can i drive" is a question
+    # about one. Both are the same proposition underneath, which is why
+    # telling Soup the first lets it answer the second.
+    add(
+        "(i|we) (can|could) {a:action}",
+        lambda b, e: _modal(call("User"), b["a"]),
+    )
+    add(
+        "(i|we) (can|could) (not) {a:action}",
+        lambda b, e: _modal(call("User"), b["a"], truth=False),
+        bonus=2,
+    )
+    add(
+        "(you) (can|could) {a:action}",
+        lambda b, e: _modal(call("Assistant"), b["a"]),
+    )
+    add(
+        "(can|could) (i|we) {a:action}",
+        lambda b, e: call("Ask", proposition=call("Can", subject=call("User"), action=b["a"])),
+    )
     add(
         "(and) {v:value}",
         lambda b, e: call("Question", about=b["v"]),
@@ -1577,6 +1613,17 @@ def _teaching(word: Expr, body: Expr, always_parameterised: bool = False) -> Exp
 
 
 _SUBJ = "_subj"
+
+
+def _how_are_you() -> Expr:
+    return call("Question", about=call("State", subject=call("Assistant")))
+
+
+def _modal(subject: Expr, action: Expr, truth: bool = True) -> Expr:
+    proposition = call("Can", subject=subject, action=action)
+    if truth:
+        return call("Remember", proposition=proposition)
+    return call("Remember", proposition=proposition, truth=Lit(False))
 
 
 def _attach_subject(predicate: Expr, subject: Expr) -> Expr:

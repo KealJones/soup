@@ -52,6 +52,18 @@ _CONCEPT_WORDS: Dict[str, str] = {
 _SUBJECT_WORDS = {"User": "you", "Assistant": "I", "We": "we"}
 _POSSESSIVE = {"User": "your", "Assistant": "my", "We": "our"}
 
+# Modals take a bare verb after them, which is the only reason they need
+# their own handling: "you can drive", never "you can drives".
+_MODALS = {
+    "Can": "can",
+    "Could": "could",
+    "Must": "must",
+    "Should": "should",
+    "May": "may",
+    "Might": "might",
+    "Will": "will",
+}
+
 
 def words_for(concept: str) -> str:
     if concept in _CONCEPT_WORDS:
@@ -132,10 +144,14 @@ class Mouth:
         about = expr.get("about")
         if about is None:
             return "got it"
+        truth = expr.get("truth")
+        said = self.clause(about)
+        if isinstance(truth, Lit) and truth.value is False:
+            said = _negated(said)
         return self._pick(
             "got it",
             "noted",
-            "okay, %s" % self.clause(about),
+            "okay, %s" % said,
             "alright, i'll remember that",
         )
 
@@ -313,6 +329,12 @@ class Mouth:
             return "the %s" % words.lower()
         return words
 
+    def _bare_verb(self, action: Optional[Expr]) -> str:
+        """The verb as it sits after a modal, uninflected."""
+        if isinstance(action, Call) and not action.args:
+            return words_for(action.concept)
+        return self.describe(action)
+
     def _membership(self, kind: Optional[Expr]) -> str:
         """"is a dog", but "is symmetric": qualities take no article.
 
@@ -349,6 +371,14 @@ class Mouth:
         subject = expr.get("subject")
         obj = expr.get("object")
         value = expr.get("value")
+
+        modal = _MODALS.get(expr.concept)
+        if modal is not None and expr.has("action"):
+            return "%s %s %s" % (
+                self.subject_words(subject),
+                modal,
+                self._bare_verb(expr.get("action")),
+            )
 
         if subject is not None and obj is not None:
             return "%s %s %s" % (
@@ -447,7 +477,18 @@ def _agree(verb: str, subject: Expr) -> str:
 
 def _negated(clause: str) -> str:
     """"Bob is older than Alice" -> "Bob is not older than Alice"."""
-    for verb in (" is ", " are ", " am ", " was ", " were "):
+    for verb in (
+        " is ",
+        " are ",
+        " am ",
+        " was ",
+        " were ",
+        " can ",
+        " could ",
+        " will ",
+        " should ",
+        " must ",
+    ):
         if verb in clause:
             return clause.replace(verb, verb[:-1] + " not ", 1)
     return "that's not true" if not clause else "%s, no" % clause
@@ -455,6 +496,8 @@ def _negated(clause: str) -> str:
 
 def _is_proposition(expr: Call) -> bool:
     """Something that could be true or false, rather than something with a value."""
+    if expr.concept in _MODALS and expr.has("action"):
+        return True
     return (expr.has("subject") and expr.has("object")) or (
         expr.has("left") and expr.has("right")
     )

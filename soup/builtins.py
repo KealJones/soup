@@ -8,6 +8,7 @@ to more concepts. That is the whole point.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 
 from .expr import Arg, Call, Expr, Lit, Seq, Var, call, render, substitute
@@ -572,11 +573,11 @@ def _remember(ctx: Context, c: Call) -> Optional[Expr]:
     if proposition is None:
         return None
     truth = _bool(c.get("truth"))
-    ctx.knowledge.assert_fact(
-        proposition, True if truth is None else truth, Evidence(source="user")
-    )
+    settled = True if truth is None else truth
+    ctx.knowledge.assert_fact(proposition, settled, Evidence(source="user"))
     ctx.effect("remembered %s" % render(proposition, False))
-    return Call("Acknowledged", (Arg("about", proposition),))
+    # Carry the truth through, or "i can't swim" comes back as "okay, you can swim".
+    return Call("Acknowledged", (Arg("about", proposition), Arg("truth", Lit(settled))))
 
 
 @native("Recall", special=True)
@@ -591,6 +592,44 @@ def _recall(ctx: Context, c: Call) -> Optional[Expr]:
         "Explanation",
         (Arg("concept", subject), Arg("facts", Seq(tuple(facts)))),
     )
+
+
+# ---------------------------------------------------------------------------
+# the clock
+#
+# The only realizations that read anything outside the store. They answer the
+# questions people actually open with, and "i don't know what the time is" is
+# a silly thing for a program to say.
+# ---------------------------------------------------------------------------
+
+
+@native("Time", "Now")
+def _time(ctx: Context, c: Call) -> Optional[Expr]:
+    if c.args:
+        return None
+    ctx.effect("read the clock")
+    return Lit(datetime.now().strftime("%I:%M %p").lstrip("0").lower())
+
+
+@native("Date", "Today")
+def _date(ctx: Context, c: Call) -> Optional[Expr]:
+    if c.args:
+        return None
+    return Lit(datetime.now().strftime("%B %d, %Y").replace(" 0", " "))
+
+
+@native("Day", "Weekday")
+def _day(ctx: Context, c: Call) -> Optional[Expr]:
+    if c.args:
+        return None
+    return Lit(datetime.now().strftime("%A"))
+
+
+@native("Year")
+def _year(ctx: Context, c: Call) -> Optional[Expr]:
+    if c.args:
+        return None
+    return Lit(datetime.now().year)
 
 
 # ---------------------------------------------------------------------------

@@ -309,6 +309,44 @@ class TestConversation(unittest.TestCase):
         said = reply(self.session, "how old is Carl")
         self.assertTrue("know" in said or "no idea" in said, said)
 
+    def test_a_heard_sentence_is_never_called_unintelligible(self):
+        """Not knowing the word is our problem, not a failure to hear."""
+        said = reply(self.session, "what is the flumph?")
+        self.assertNotIn("catch", said)
+        self.assertNotIn("past me", said)
+        self.assertTrue("know" in said or "no idea" in said, said)
+
+    def test_gibberish_is_still_admitted_as_unheard(self):
+        said = reply(self.session, "asdkjh qwe zzz")
+        self.assertTrue(
+            "catch" in said or "past me" in said or "couldn't turn" in said, said
+        )
+
+    def test_the_clock_answers(self):
+        self.assertRegex(reply(self.session, "what time is it?"), r"\d:\d\d")
+        self.assertRegex(reply(self.session, "what is the date?"), r"\d{4}")
+
+    def test_a_capability_told_is_a_capability_answered(self):
+        reply(self.session, "i can drive")
+        self.assertIn(reply(self.session, "can i drive?")[:3], ("yep", "yea", "yes", "cor"))
+        said = reply(self.session, "can i fly?")
+        self.assertTrue("know" in said or "no idea" in said or "never told" in said, said)
+
+    def test_a_denied_capability_stays_denied(self):
+        reply(self.session, "i can not swim")
+        said = reply(self.session, "can i swim?")
+        self.assertIn(said[:2], ("no", "na", "nu"))
+
+    def test_modals_read_as_english(self):
+        clause = self.session.mouth.clause(parse("Can(subject=User(), action=Drive())"))
+        self.assertEqual(clause, "you can drive")
+
+    def test_how_are_you_has_more_than_one_spelling(self):
+        for greeting in ["howsit?", "sup", "how is it going", "how you doing"]:
+            said = reply(fresh(seed=5), greeting)
+            self.assertNotIn("catch", said)
+            self.assertNotIn("past me", said)
+
     def test_teaching_loop(self):
         asked = reply(self.session, "what is the vibe of [1,2,3]")
         self.assertIn("Vibe", asked)
