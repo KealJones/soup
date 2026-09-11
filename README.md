@@ -1,7 +1,7 @@
 # soup
 
 A small conversational system that thinks in concepts instead of tokens. No
-API key, no dependencies, just Python and a local model doing the listening.
+API key. A local model sits in-process and does the listening.
 
 A model reads the sentence, and that is all it does. Everything after that is
 Soup's: what the concepts mean, how they resolve, what gets learned when one
@@ -27,10 +27,19 @@ soup > it's 2
 
 ## Running it
 
-Needs Python 3.9 or newer, and a local model to do the listening. Ollama with
-`qwen3.5:4b` is the default and nothing has to be configured for it. No pip
-install, no API key: the whole thing is stdlib, and talking to the model is
-`urllib` against localhost.
+Needs Python 3.9 or newer and a model. On this Mac that means MLX: soup
+loads `qwen3.5:4b` itself, in-process, no server. First run downloads the
+4-bit weights (~2GB) into the Hugging Face cache.
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+./chat
+```
+
+Ollama is optional. If you already `ollama pull`'d something, `--llm` still
+accepts those names; they map onto the matching MLX repo. A path to a `.gguf`
+or `$SOUP_LLM_URL` still work if you would rather.
 
 ```sh
 ./chat                          # talk to it
@@ -183,10 +192,11 @@ elsewhere. So a model does it, from a seat with exactly three methods on it:
 | `answer()` | what is this worth, if nothing else could tell us? |
 
 ```sh
-./chat
+./chat                              # mmap qwen3.5:4b from ~/.ollama, in-process
 ./chat --llm qwen3.5:4b
-SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat
-./chat --deaf     # no model. soup will not understand a word, and says so
+./chat --llm /path/to/model.gguf
+SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat   # still works
+./chat --deaf                       # no model. soup will not understand a word
 ```
 
 Nothing else in Soup talks to a model, and nothing that comes back is trusted
@@ -340,11 +350,9 @@ on record and nine of them stopped some time ago.
 With no network the lookup marks itself unavailable and everything carries on
 exactly as before.
 
-Ollama's native `/api/chat` is the default because it is the only endpoint of
-the two that can actually turn thinking off; through the OpenAI-compatible
-one a reasoning model spends fifty seconds on a single line of syntax instead
-of two. Any OpenAI-shaped server works, it is all stdlib `urllib`, and no
-server running just means no seat.
+The model is in-process. On Apple Silicon that is MLX running a 4-bit
+Qwen3.5-4B; a Hugging Face id or a `.gguf` path also work. A server is still
+accepted if `$SOUP_LLM_URL` is set.
 
 ### Teaching it things
 

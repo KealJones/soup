@@ -253,11 +253,18 @@ class Seat:
         model: str = DEFAULT_MODEL,
         key: Optional[str] = None,
         timeout: float = 30.0,
+        embed: bool = False,
+        weights: Optional[str] = None,
     ) -> None:
         self.url = url
         self.model = model
         self.key = key
         self.timeout = timeout
+        # In-process llama.cpp, lazy. Tests construct a Seat and stub `_ask`;
+        # they must not mmap three gigabytes on import.
+        self.embed = embed
+        self.weights = weights
+        self._local = None
         self.calls = 0
         self.failures = 0
         # One dead connection is enough. Nobody wants every turn to wait for
@@ -399,7 +406,43 @@ class Seat:
             return None
         return meaning
 
+    def _engine(self):
+        """The in-process model, loaded once, or None if we should use HTTP.
+
+        Failed loads are remembered as False so a missing llama-cpp-python
+        does not get re-imported on every sentence.
+        """
+        if not self.embed:
+            return None
+        if self._local is False:
+            return None
+        if self._local is not None:
+            return self._local
+        from .local import load
+
+        try:
+            self._local = load(self.model, self.weights)
+        except Exception as exc:
+            self.last_error = "could not load %s: %s" % (self.model, exc)
+            self._local = False
+            return None
+        if self._local is None:
+            self._local = False
+            return None
+        return self._local
+
     def _ask(self, system: str, utterance: str) -> Optional[str]:
+        engine = self._engine()
+        if engine is not None:
+            self.calls += 1
+            from .local import chat
+
+            try:
+                return chat(engine, system, utterance)
+            except Exception as exc:
+                self.failures += 1
+                self.last_error = str(exc)
+                return None
         body = json.dumps(self._payload(system, utterance)).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.key:
@@ -658,11 +701,16 @@ def seat_from_env() -> Optional[Seat]:
     """A seat if the environment asks for one, otherwise nothing at all."""
     url = os.environ.get("SOUP_LLM_URL")
     model = os.environ.get("SOUP_LLM_MODEL")
-    if not url and not model:
+    weights = os.environ.get("SOUP_LLM_WEIGHTS")
+    if not url and not model and not weights:
         return None
     return Seat(
         url=url or DEFAULT_URL,
         model=model or DEFAULT_MODEL,
         key=os.environ.get("SOUP_LLM_KEY"),
         timeout=float(os.environ.get("SOUP_LLM_TIMEOUT", "30")),
+        # A URL means they already have a server. Weights or a model name
+        # without a URL means load them ourselves.
+        embed=url is None,
+        weights=weights,
     )

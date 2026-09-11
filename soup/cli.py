@@ -221,8 +221,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         nargs="?",
         const="",
         metavar="MODEL",
-        help="which local model does the listening "
-        "(default ollama, or set $SOUP_LLM_URL / $SOUP_LLM_MODEL)",
+        help="which model does the listening "
+        "(ollama name, path to a .gguf, or $SOUP_LLM_MODEL). "
+        "weights on disk are loaded in-process; a URL still talks HTTP",
     )
     parser.add_argument(
         "--deaf",
@@ -237,10 +238,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Listening is the model's job, so there is one unless you say otherwise.
-    seat = None if args.deaf else (seat_from_env() or Seat())
+    # Listening is the model's job. Prefer weights already on disk; fall
+    # back to a server only when the environment pointed at one.
+    seat = None if args.deaf else (seat_from_env() or Seat(embed=True))
     if seat is not None and args.llm:
         seat.model = args.llm
+        if args.llm.endswith(".gguf") or os.path.isfile(args.llm):
+            seat.weights = args.llm
+            seat.embed = True
 
     session = Session(memory_path=None if args.no_memory else args.memory, llm=seat)
     if args.wikidata:
