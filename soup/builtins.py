@@ -8,6 +8,11 @@ to more concepts. That is the whole point.
 
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from typing import List, Optional
 
@@ -597,9 +602,8 @@ def _recall(ctx: Context, c: Call) -> Optional[Expr]:
 # ---------------------------------------------------------------------------
 # the clock
 #
-# The only realizations that read anything outside the store. They answer the
-# questions people actually open with, and "i don't know what the time is" is
-# a silly thing for a program to say.
+# World-facing, same family as Read/Write/Fetch below. "i don't know what
+# the time is" is a silly thing for a program to say.
 # ---------------------------------------------------------------------------
 
 
@@ -645,6 +649,249 @@ def _year(ctx: Context, c: Call) -> Optional[Expr]:
     if c.args:
         return None
     return Lit(datetime.now().year)
+
+
+# ---------------------------------------------------------------------------
+# the world
+#
+# These bottom out the way Time does: they touch something that is not the
+# store. Everything built on them (Create, Change, a Wikidata lookup) is a
+# rule, not a new Python adapter.
+# ---------------------------------------------------------------------------
+
+_AGENT = "soup/0.1 (https://github.com/kealjones/soup) python-urllib"
+
+
+def _as_text(expr: Optional[Expr]) -> Optional[str]:
+    if isinstance(expr, Lit) and expr.value is not None:
+        return str(expr.value)
+    return None
+
+
+def _as_path(expr: Optional[Expr]) -> Optional[str]:
+    text = _as_text(expr)
+    if text is not None:
+        return text
+    if isinstance(expr, Call):
+        inner = expr.get("path") or expr.get("file") or expr.get("name")
+        if inner is not None:
+            return _as_path(inner)
+    return None
+
+
+def _from_json(value) -> Expr:
+    if isinstance(value, dict):
+        return Call("Object", tuple(Arg(str(k), _from_json(v)) for k, v in value.items()))
+    if isinstance(value, list):
+        return Seq(tuple(_from_json(item) for item in value))
+    if isinstance(value, bool) or value is None:
+        return Lit(value)
+    if isinstance(value, float) and value.is_integer():
+        return Lit(int(value))
+    return Lit(value)
+
+
+def _write_file(ctx: Context, path: str, text: str) -> Expr:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    ctx.effect("wrote %s" % path)
+    return Call("Acknowledged", (Arg("about", Call("Write", (Arg("path", Lit(path)),))),))
+
+
+def _query_string(expr: Optional[Expr]) -> str:
+    if expr is None:
+        return ""
+    text = _as_text(expr)
+    if text is not None:
+        return text
+    if isinstance(expr, Call):
+        pairs = []
+        for arg in expr.args:
+            if not arg.name:
+                continue
+            value = _as_text(arg.value)
+            if value is None:
+                continue
+            pairs.append((arg.name, value))
+        return urllib.parse.urlencode(pairs)
+    return ""
+
+
+@native("File", "Directory", "Folder", "Object")
+def _stands(ctx: Context, c: Call) -> Optional[Expr]:
+    """Things that are themselves. A file is not a failed computation."""
+    return c
+
+
+@native("PathOf")
+def _path_of(ctx: Context, c: Call) -> Optional[Expr]:
+    path = _as_path(c.first("of", "value", "path", "file"))
+    return Lit(path) if path is not None else None
+
+
+@native("Join")
+def _join(ctx: Context, c: Call) -> Optional[Expr]:
+    parts = [_as_path(a.value) for a in c.args]
+    if any(p is None for p in parts) or not parts:
+        return None
+    return Lit(os.path.join(*parts))
+
+
+@native("Concat")
+def _concat(ctx: Context, c: Call) -> Optional[Expr]:
+    parts = [_as_text(a.value) for a in c.args]
+    if any(p is None for p in parts):
+        return None
+    return Lit("".join(parts))
+
+
+@native("Replace")
+def _replace(ctx: Context, c: Call) -> Optional[Expr]:
+    positional = c.positional()
+    text = _as_text(c.first("text", "value", "in"))
+    old = _as_text(c.get("from") or c.get("old") or (positional[1] if len(positional) > 1 else None))
+    new = _as_text(c.get("to") or c.get("new") or (positional[2] if len(positional) > 2 else None))
+    if text is None or old is None or new is None:
+        return None
+    return Lit(text.replace(old, new))
+
+
+@native("GetProperty", "At", "Field")
+def _get_property(ctx: Context, c: Call) -> Optional[Expr]:
+    obj = c.first("of", "from", "object", "in")
+    key_expr = c.get("key") or c.get("name") or _second(c)
+    if obj is None or key_expr is None:
+        return None
+    key = _as_text(key_expr)
+    if key is None and _num(key_expr) is not None:
+        key = int(_num(key_expr))
+    if isinstance(obj, Call) and isinstance(key, str):
+        found = obj.get(key)
+        return found if found is not None else unknown(c)
+    if isinstance(obj, Seq):
+        items = list(obj.items)
+        if isinstance(key, int) and 0 <= key < len(items):
+            return items[key]
+        return unknown(c)
+    return None
+
+
+@native("Json")
+def _json_parse(ctx: Context, c: Call) -> Optional[Expr]:
+    text = _as_text(c.first("text", "of", "value"))
+    if text is None:
+        return None
+    try:
+        return _from_json(json.loads(text))
+    except ValueError:
+        return unknown(c)
+
+
+@native("Read")
+def _read(ctx: Context, c: Call) -> Optional[Expr]:
+    path = _as_path(c.first("path", "file", "of"))
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            ctx.effect("read %s" % path)
+            return Lit(fh.read())
+    except OSError:
+        return unknown(c)
+
+
+@native("Write")
+def _write(ctx: Context, c: Call) -> Optional[Expr]:
+    positional = c.positional()
+    path = _as_path(
+        c.get("path") or c.get("file") or c.get("to") or (positional[0] if positional else None)
+    )
+    text = _as_text(
+        c.get("contents")
+        or c.get("content")
+        or c.get("text")
+        or (positional[1] if len(positional) > 1 else None)
+    )
+    if path is None or text is None:
+        return None
+    return _write_file(ctx, path, text)
+
+
+@native("Files")
+def _files(ctx: Context, c: Call) -> Optional[Expr]:
+    path = _as_path(c.first("path", "folder", "of", "in"))
+    if path is None:
+        return None
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return unknown(c)
+    ctx.effect("listed %s" % path)
+    return Seq(tuple(Lit(name) for name in names))
+
+
+@native("Delete")
+def _delete(ctx: Context, c: Call) -> Optional[Expr]:
+    path = _as_path(c.first("path", "file", "target", "of"))
+    if path is None:
+        return None
+    try:
+        os.remove(path)
+    except IsADirectoryError:
+        os.rmdir(path)
+    except OSError:
+        return unknown(c)
+    ctx.effect("deleted %s" % path)
+    return Call("Acknowledged", (Arg("about", Call("Delete", (Arg("path", Lit(path)),))),))
+
+
+@native("Url")
+def _url(ctx: Context, c: Call) -> Optional[Expr]:
+    """A URL is structure, not a string you glue together.
+
+    Fetch(Url(scheme, host, path, query=Object(...))) is the whole point.
+    A lone string still works because people will say it that way, but
+    soup should not be in the business of concatenating query strings.
+    """
+    if len(c.args) == 1 and not c.arg_names():
+        text = _as_text(c.args[0].value)
+        return Lit(text) if text is not None else None
+    scheme = _as_text(c.first("scheme", "protocol")) or "https"
+    host = _as_text(c.first("host", "domain"))
+    if not host:
+        return None
+    path = _as_text(c.get("path")) or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    query = _query_string(c.get("query"))
+    return Lit(urllib.parse.urlunparse((scheme, host, path, "", query, "")))
+
+
+@native("Fetch")
+def _fetch(ctx: Context, c: Call) -> Optional[Expr]:
+    url = _as_text(c.first("url", "from", "of"))
+    if url is None:
+        return None
+    request = urllib.request.Request(
+        url, headers={"User-Agent": _AGENT, "Accept": "*/*"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8.0) as response:
+            raw = response.read()
+        ctx.effect("fetched %s" % url)
+        try:
+            return Lit(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return Lit(raw.decode("utf-8", "replace"))
+    except TimeoutError:
+        ctx.note("fetch timed out: %s" % url)
+        return unknown(c)
+    except (urllib.error.URLError, OSError) as problem:
+        ctx.note("fetch failed: %s" % problem)
+        return unknown(c)
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +971,7 @@ def _identity(ctx: Context, c: Call) -> Optional[Expr]:
     "Taught",
     "Answer",
     "Assertion",
+    "Acknowledged",
     special=True,
 )
 def _self_describing(ctx: Context, c: Call) -> Optional[Expr]:
@@ -832,6 +1080,10 @@ _KINDS = {
         ("User", "the person talking to me"),
         ("Assistant", "me, Soup"),
         ("Nothing", ""),
+        ("File", "a file on disk"),
+        ("Directory", "a folder on disk"),
+        ("Folder", "a folder on disk"),
+        ("Object", "a bundle of named fields, as json becomes"),
     ],
     "value": [("Number", ""), ("Text", ""), ("Truth", ""), ("List", "")],
     "operation": [
@@ -873,6 +1125,24 @@ _KINDS = {
         "Ask",
         "Remember",
         "Recall",
+        "Read",
+        "Write",
+        "Files",
+        "Delete",
+        "Fetch",
+        "Url",
+        "Json",
+        "GetProperty",
+        "At",
+        "Field",
+        "Join",
+        "Concat",
+        "Replace",
+        "PathOf",
+        "Create",
+        "Change",
+        "Edit",
+        "Put",
     ],
     "relation": [
         "GreaterThan",
@@ -917,6 +1187,9 @@ _KINDS = {
         "FileSize",
         "Location",
         "Job",
+        ("Path", "where a file or folder lives"),
+        ("Contents", "what a file holds"),
+        ("Source", "the text a thing should be written as"),
         ("Time", "what time it is now, on an ordinary 12-hour clock"),
         ("TwentyFourHourTime", "what time it is now, on a 24-hour clock"),
         "Even",
@@ -963,6 +1236,11 @@ _CORE_RULES = [
     "AtLeast(left=a, right=b) := Not(LessThan(left=a, right=b))",
     "AtMost(left=a, right=b) := Not(GreaterThan(left=a, right=b))",
     "Location(subject=s) := Query(pattern=LivesIn(subject=s, object=Where()))",
+    "Put(folder=f, x) := Write(path=Join(f, PathOf(x)), contents=GetProperty(x, \"contents\"))",
+    "Create(target=t, files=xs) := Map(collection=xs, transformation=Put(folder=PathOf(t)))",
+    "Change(target=t, from=a, to=b) := Write(path=PathOf(t), contents=Replace(Read(path=PathOf(t)), a, b))",
+    "Edit(target=t, from=a, to=b) := Write(path=PathOf(t), contents=Replace(Read(path=PathOf(t)), a, b))",
+    "Contents(of=x) := GetProperty(x, \"contents\")",
 ]
 
 # How the relations themselves behave. Ordinary edges, which is the whole

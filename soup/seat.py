@@ -111,6 +111,12 @@ Question(about=DateOfBirth(subject=AlbertEinstein()))
 delete the biggest file in my downloads folder
 Request(action=Delete(target=Maximum(collection=AllOf(kind=File(), within=Downloads()), by=FileSize())))
 
+create greet.py and main.py in /tmp/scratch
+Request(action=Create(target=Directory(path="/tmp/scratch"), files=[File(path="greet.py", contents="def hello():\\n    return 'hi'\\n"), File(path="main.py", contents="from greet import hello\\nprint(hello())\\n")]))
+
+change hello.py so it prints goodbye instead of hello
+Request(action=Change(target=File(path="hello.py"), from="hello", to="goodbye"))
+
 why is the sky blue
 Question(about=Why(proposition=Is(subject=Sky(), value=Blue())))
 

@@ -245,6 +245,9 @@ class Realizer:
             # more a failed computation than "dog" is.
             return evaluated
 
+        if self._is_value(evaluated):
+            return evaluated
+
         if not known_concept:
             worked_out = self._learn_concept(evaluated, env, depth, result)
             if worked_out is not None:
@@ -339,7 +342,7 @@ class Realizer:
         cd = self.knowledge.concept(expr.concept)
         if cd is None:
             return not expr.args
-        return cd.kind in ("entity", "thing", "quality", "value", "modality", "relation")
+        return cd.kind in ("entity", "thing", "quality", "value")
 
     def _learn_concept(
         self, expr: Call, env: Dict[str, Expr], depth: int, result: Result
@@ -399,7 +402,9 @@ class Realizer:
         you which answers were ours and which were borrowed, and you can
         contradict any of them.
         """
-        if not self._asking or self._outside_budget <= 0:
+        if self._outside_budget <= 0:
+            return None
+        if not self._asking and not self._fact_shaped(expr):
             return None
         if any(arg.name in _PROPOSITIONAL for arg in expr.args):
             # A wrapper around the real question. Whatever it wraps has
@@ -423,6 +428,15 @@ class Realizer:
                 )
             return answer
         return None
+
+    def _fact_shaped(self, expr: Call) -> bool:
+        """A missing *value* of an attribute, even inside a request.
+
+        Requests must not ask the model to *do* the action. They may ask
+        what a file's Source is, the way a question asks Alice's Age.
+        """
+        cd = self.knowledge.concept(expr.concept)
+        return cd is not None and cd.kind == "attribute"
 
     def _sources(self):
         if self.lookup is not None and getattr(self.lookup, "available", True):

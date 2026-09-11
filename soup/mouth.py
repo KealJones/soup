@@ -127,6 +127,10 @@ class Mouth:
         if isinstance(value, Lit) and isinstance(value.value, bool):
             return self._truth_reply(value.value, asked)
         if isinstance(value, Seq):
+            if value.items and all(
+                isinstance(i, Call) and i.concept == "Acknowledged" for i in value.items
+            ):
+                return self._pick("done", "got it", "okay, wrote that")
             return self._pick("%s" % described, "that gives %s" % described)
         if asked is not None and _is_computation(asked):
             return self._pick("%s" % described, "that's %s" % described, "it's %s" % described)
@@ -147,6 +151,8 @@ class Mouth:
         about = expr.get("about")
         if about is None:
             return "got it"
+        if isinstance(about, Call) and about.concept in ("Write", "Delete"):
+            return self._pick("done", "got it", "okay, wrote that")
         truth = expr.get("truth")
         said = self.clause(about)
         if isinstance(truth, Lit) and truth.value is False:

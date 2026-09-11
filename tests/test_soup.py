@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,11 @@ def _items(k: int = 3, lo: int = 1, hi: int = 9):
 
 def _list(xs) -> str:
     return "[%s]" % ", ".join(str(x) for x in xs)
+
+
+def _q(s) -> str:
+    """A string literal the concept parser will accept."""
+    return '"%s"' % str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 class TestExpressions(unittest.TestCase):
@@ -958,6 +964,89 @@ class TestConversation(unittest.TestCase):
         hi = _pick(("heya soup", "yo soup", "howdy soup"))
         session = talking({hi: "Greeting()"}, seed=3)
         self.assertTrue(reply(session, hi))
+
+
+class TestTheWorld(unittest.TestCase):
+    """Read, write, fetch, json. Natives for the wire; Create/Change are rules."""
+
+    def test_write_then_read_round_trips(self):
+        text = _pick(("hi", "yo", "hey"))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "%s.txt" % _pick(("a", "b", "c")))
+            session = fresh()
+            reply(session, "Request(action=Write(path=%s, contents=%s))" % (_q(path), _q(text)))
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), text)
+            said = reply(session, "Question(about=Read(path=%s))" % _q(path))
+            self.assertIn(text, said)
+
+    def test_json_get_and_replace_compose(self):
+        n = _n()
+        word, other = _pick(("cat", "dog")), _pick(("hat", "log"))
+        r = Realizer(fresh_knowledge())
+        got = r.realize(parse("GetProperty(Json('{\"n\": %s}'), \"n\")" % n))
+        self.assertEqual(got.value, Lit(n), n)
+        swapped = r.realize(parse("Replace(%s, %s, %s)" % (_q(word), _q(word), _q(other))))
+        self.assertEqual(swapped.value, Lit(other), (word, other))
+        url = r.realize(
+            parse(
+                'Url(scheme="https", host="example.com", path="/w/api.php", '
+                'query=Object(action="wbsearchentities", search="france"))'
+            )
+        )
+        self.assertEqual(
+            url.value,
+            Lit("https://example.com/w/api.php?action=wbsearchentities&search=france"),
+        )
+
+    def test_create_a_two_file_app_from_scratch(self):
+        fn = _pick(("hello", "greet", "wave"))
+        word = _pick(("hi", "yo", "hey"))
+        mod = _pick(("greet", "voice", "sayhi"))
+        greet_src = 'def %s():\n    return "%s"\n' % (fn, word)
+        main_src = "from %s import %s\nprint(%s())\n" % (mod, fn, fn)
+        english = (
+            "create a tiny python app with two files in %s: %s.py with a %s() "
+            "function that returns %s, and main.py that prints %s()"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, "scratch")
+            heard = (
+                "Request(action=Create(target=Directory(path=%s), files=["
+                "File(path=%s, contents=%s), File(path=%s, contents=%s)]))"
+                % (_q(folder), _q(mod + ".py"), _q(greet_src), _q("main.py"), _q(main_src))
+            )
+            session = talking({english % (folder, mod, fn, word, fn): heard})
+            reply(session, english % (folder, mod, fn, word, fn))
+            greet_path = os.path.join(folder, mod + ".py")
+            main_path = os.path.join(folder, "main.py")
+            self.assertTrue(os.path.isfile(greet_path), greet_path)
+            self.assertTrue(os.path.isfile(main_path), main_path)
+            with open(greet_path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), greet_src)
+            with open(main_path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), main_src)
+            ran = subprocess.run(
+                ["python3", "main.py"], cwd=folder, capture_output=True, text=True, timeout=5
+            )
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertEqual(ran.stdout.strip(), word)
+
+    def test_change_an_existing_program(self):
+        old, new = _pick(("hello", "howdy")), _pick(("goodbye", "later"))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "hello.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('print("%s")\n' % old)
+            english = "change %s so it prints %s instead of %s" % (path, new, old)
+            heard = (
+                "Request(action=Change(target=File(path=%s), from=%s, to=%s))"
+                % (_q(path), _q(old), _q(new))
+            )
+            session = talking({english: heard})
+            reply(session, english)
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), 'print("%s")\n' % new)
 
 
 # Real payloads, trimmed. Recorded from wikidata.org so the shapes are not invented.

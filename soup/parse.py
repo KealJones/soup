@@ -66,7 +66,8 @@ def _tokenize(src: str) -> List[_Token]:
             buf = []
             while i < n and src[i] != quote:
                 if src[i] == "\\" and i + 1 < n:
-                    buf.append(src[i + 1])
+                    esc = src[i + 1]
+                    buf.append({"n": "\n", "t": "\t", "r": "\r"}.get(esc, esc))
                     i += 2
                     continue
                 buf.append(src[i])

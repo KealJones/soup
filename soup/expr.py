@@ -194,7 +194,14 @@ def _render_lit(v: Any) -> str:
         return repr(round(v, 10))
     if isinstance(v, int):
         return str(v)
-    return '"%s"' % str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return '"%s"' % (
+        str(v)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def render(expr: Expr, multiline: bool = True, indent: int = 0) -> str:
