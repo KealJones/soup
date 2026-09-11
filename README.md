@@ -1,7 +1,7 @@
 # soup
 
 A small conversational system that thinks in concepts instead of tokens. No
-model, no API key, no network. About 3k lines of dependency-free Python.
+model, no API key, no network, no dependencies. Just Python.
 
 ```
 you  > Alice is 30 years old
@@ -130,6 +130,27 @@ Soup distinguishes them, because they call for different replies.
 An utterance where *every* content word is a mystery is none of the above. That
 is not a concept to be taught, it is a sentence Soup failed to hear, and it
 says so.
+
+### Relations are concepts too
+
+There is no enum of relation kinds. `IsA`, `PartOf` and `OppositeOf` are
+concepts like any other, and how far a walk over them travels is decided by
+properties asserted about them rather than by code:
+
+```
+you  > Remember(proposition=IsA(subject=RhymesWith(), kind=Symmetric()))
+soup > okay, rhymes with is symmetric
+```
+
+After that, `related("Fig", "RhymesWith")` finds `Big`, where a moment earlier
+it found nothing. Marking a relation `Taxonomic` likewise puts it to work in
+`is_a` and in realization inheritance, so a relation nobody anticipated can
+carry a taxonomy.
+
+`knowledge.py` knows only three property names, `Symmetric`, `Transitive` and
+`Taxonomic`, plus the two edges that attach them. Everything else about how
+relations behave is asserted knowledge, editable at runtime and saved with the
+rest of memory.
 
 ### Teaching it things
 

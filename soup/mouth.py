@@ -313,6 +313,20 @@ class Mouth:
             return "the %s" % words.lower()
         return words
 
+    def _membership(self, kind: Optional[Expr]) -> str:
+        """"is a dog", but "is symmetric": qualities take no article.
+
+        The kind slot always names a category, so it is written bare, without
+        whatever article the noun was introduced with.
+        """
+        if not isinstance(kind, Call) or kind.args:
+            return "is a %s" % self.describe(kind)
+        words = _name_words(kind.concept).lower()
+        cd = self.knowledge.concept(kind.concept)
+        if cd is not None and cd.kind in ("quality", "property"):
+            return "is %s" % words
+        return "is %s %s" % ("an" if words[:1] in tuple("aeiou") else "a", words)
+
     def possessive(self, subject: Expr) -> str:
         if isinstance(subject, Call) and not subject.args:
             if subject.concept in _POSSESSIVE:
@@ -360,8 +374,7 @@ class Mouth:
                 self.describe(value),
             )
         if expr.concept == "IsA":
-            kind = expr.get("kind")
-            return "%s is a %s" % (self.subject_words(subject), self.describe(kind))
+            return "%s %s" % (self.subject_words(subject), self._membership(expr.get("kind")))
 
         left = expr.get("left")
         right = expr.get("right")

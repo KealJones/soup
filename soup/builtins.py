@@ -11,7 +11,14 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .expr import Arg, Call, Expr, Lit, Seq, Var, call, render, substitute
-from .knowledge import Evidence, Knowledge, Relation
+from .knowledge import (
+    HAS_PROPERTY,
+    SYMMETRIC,
+    TAXONOMIC,
+    TRANSITIVE,
+    Evidence,
+    Knowledge,
+)
 from .parse import parse, parse_definition
 from .realize import Context, NATIVES, native
 
@@ -795,6 +802,17 @@ _KINDS = {
         "BiggerThan",
         "PartOf",
         "IsA",
+        "InstanceOf",
+        "OppositeOf",
+        "SimilarTo",
+        "RealizedBy",
+        "HasProperty",
+        "InverseOf",
+    ],
+    "property": [
+        ("Symmetric", "holds just as well the other way round"),
+        ("Transitive", "carries on down the chain"),
+        ("Taxonomic", "points at a more general kind"),
     ],
     "attribute": [
         "Age",
@@ -852,16 +870,28 @@ _CORE_RULES = [
     "Location(subject=s) := Query(pattern=LivesIn(subject=s, object=Where()))",
 ]
 
+# How the relations themselves behave. Ordinary edges, which is the whole
+# point: symmetry and taxonomy are not wired into the traversal, so a relation
+# invented this afternoon can be given the same standing just by saying so.
+_RELATION_PROPERTIES = [
+    ("IsA", HAS_PROPERTY, TAXONOMIC),
+    ("IsA", HAS_PROPERTY, TRANSITIVE),
+    ("InstanceOf", HAS_PROPERTY, TAXONOMIC),
+    ("PartOf", HAS_PROPERTY, TRANSITIVE),
+    ("OppositeOf", HAS_PROPERTY, SYMMETRIC),
+    ("SimilarTo", HAS_PROPERTY, SYMMETRIC),
+]
+
 _CORE_EDGES = [
-    ("Greeting", Relation.OppositeOf, "Farewell"),
-    ("Big", Relation.OppositeOf, "Small"),
-    ("Old", Relation.OppositeOf, "Young"),
-    ("Good", Relation.OppositeOf, "Bad"),
-    ("Fast", Relation.OppositeOf, "Slow"),
-    ("GreaterThan", Relation.OppositeOf, "LessThan"),
-    ("Double", Relation.RealizedBy, "Multiply"),
-    ("Age", Relation.IsA, "Number"),
-    ("Sum", Relation.SimilarTo, "Add"),
+    ("Greeting", "OppositeOf", "Farewell"),
+    ("Big", "OppositeOf", "Small"),
+    ("Old", "OppositeOf", "Young"),
+    ("Good", "OppositeOf", "Bad"),
+    ("Fast", "OppositeOf", "Slow"),
+    ("GreaterThan", "OppositeOf", "LessThan"),
+    ("Double", "RealizedBy", "Multiply"),
+    ("Age", "IsA", "Number"),
+    ("Sum", "SimilarTo", "Add"),
 ]
 
 
@@ -883,7 +913,7 @@ def seed(knowledge: Knowledge) -> Knowledge:
         assert isinstance(head, Call)
         knowledge.add_rule(head, body, Evidence(source="builtin"))
         knowledge.concepts[head.concept].learned = False
-    for s, r, t in _CORE_EDGES:
+    for s, r, t in _RELATION_PROPERTIES + _CORE_EDGES:
         knowledge.relate(s, r, t, builtin)
     knowledge.define("Soup", kind="entity", gloss="me")
     knowledge.assert_fact(

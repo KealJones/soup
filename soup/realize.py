@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from .expr import Arg, Call, Expr, Lit, Seq, Var, render, substitute
-from .knowledge import Evidence, Knowledge, Relation
+from .knowledge import Evidence, Knowledge
 
 __all__ = ["Gap", "Result", "Realizer", "Context", "native", "NATIVES", "SPECIAL_FORMS"]
 

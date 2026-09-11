@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from soup import Session, fresh_knowledge, parse, parse_definition, render
 from soup.expr import Arg, Call, Lit, Seq, Var, call, match, substitute
-from soup.knowledge import Evidence, Knowledge, Relation
+from soup.knowledge import SYMMETRIC, TAXONOMIC, TRANSITIVE, Evidence, Knowledge
 from soup.realize import Realizer
 
 
@@ -174,9 +174,49 @@ class TestKnowledge(unittest.TestCase):
 
     def test_inheritance(self):
         k = fresh_knowledge()
-        k.relate("Sprint", Relation.IsA, "Run")
+        k.relate("Sprint", "IsA", "Run")
         self.assertTrue(k.is_a("Sprint", "Run"))
         self.assertFalse(k.is_a("Run", "Sprint"))
+
+    def test_symmetry_comes_from_an_edge_not_from_python(self):
+        k = fresh_knowledge()
+        k.relate("Big", "RhymesWith", "Fig")
+        self.assertEqual(k.related("Fig", "RhymesWith"), [])
+        k.relate("RhymesWith", "HasProperty", SYMMETRIC)
+        self.assertEqual(k.related("Fig", "RhymesWith"), ["Big"])
+
+    def test_transitivity_chases_the_chain(self):
+        k = fresh_knowledge()
+        k.relate("Wheel", "PartOf", "Car")
+        k.relate("Car", "PartOf", "Fleet")
+        self.assertEqual(k.related("Wheel", "PartOf"), ["Car", "Fleet"])
+        self.assertEqual(k.related("Wheel", "Owns"), [])
+
+    def test_a_new_relation_can_join_the_taxonomy(self):
+        k = fresh_knowledge()
+        k.relate("Corgi", "BreedOf", "Dog")
+        self.assertFalse(k.is_a("Corgi", "Dog"))
+        k.relate("BreedOf", "HasProperty", TAXONOMIC)
+        self.assertTrue(k.is_a("Corgi", "Dog"))
+
+    def test_properties_can_be_asserted_as_ordinary_facts(self):
+        k = fresh_knowledge()
+        k.relate("Beside", "Nudges", "Near")
+        k.assert_fact(parse("IsA(subject=Nudges(), kind=Symmetric())"))
+        self.assertIn(SYMMETRIC, k.properties_of("Nudges"))
+        self.assertEqual(k.related("Near", "Nudges"), ["Beside"])
+
+    def test_inverse_relations_answer_each_other(self):
+        k = fresh_knowledge()
+        k.relate("ParentOf", "InverseOf", "ChildOf")
+        k.relate("Ann", "ParentOf", "Bo")
+        self.assertEqual(k.related("Bo", "ChildOf"), ["Ann"])
+
+    def test_seeded_relations_keep_their_old_behaviour(self):
+        k = fresh_knowledge()
+        self.assertEqual(k.related("Farewell", "OppositeOf"), ["Greeting"])
+        self.assertEqual(k.related("Add", "SimilarTo"), ["Sum"])
+        self.assertIn(TRANSITIVE, k.properties_of("IsA"))
 
 
 class TestEars(unittest.TestCase):

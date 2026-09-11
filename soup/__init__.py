@@ -14,7 +14,7 @@ from .builtins import fresh_knowledge, seed
 from .discourse import Discourse
 from .ears import Ears, Heard
 from .expr import Call, Expr, Lit, Seq, Var, call, render
-from .knowledge import Evidence, Knowledge, Relation, Rule
+from .knowledge import Evidence, Knowledge, Rule
 from .mouth import Mouth
 from .parse import parse, parse_definition
 from .realize import Gap, Realizer, Result
@@ -34,7 +34,6 @@ __all__ = [
     "Gap",
     "Teacher",
     "Knowledge",
-    "Relation",
     "Rule",
     "Evidence",
     "Discourse",

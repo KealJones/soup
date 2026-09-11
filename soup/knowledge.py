@@ -12,14 +12,18 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from .expr import Call, Expr, Var, match, render
 from .parse import parse, parse_definition
 
 __all__ = [
-    "Relation",
-    "RELATIONS",
+    "HAS_PROPERTY",
+    "INVERSE_OF",
+    "SYMMETRIC",
+    "TRANSITIVE",
+    "TAXONOMIC",
+    "PROPERTIES",
     "Evidence",
     "Edge",
     "Fact",
@@ -29,36 +33,21 @@ __all__ = [
 ]
 
 
-class Relation:
-    """Edge kinds. A small closed set on purpose: fewer choices, fewer mistakes."""
+# The meta-vocabulary: the few names the traversal itself has to understand.
+#
+# Relation kinds are deliberately absent. There is no closed set of them,
+# because a relation is only another concept; what a relation *does* is
+# decided by the properties asserted about it, and anyone can assert one.
+# "IsA" is not special to this module, it is merely the first thing anybody
+# happened to call taxonomic.
+HAS_PROPERTY = "HasProperty"
+INVERSE_OF = "InverseOf"
 
-    IsA = "IsA"
-    InstanceOf = "InstanceOf"
-    HasProperty = "HasProperty"
-    PartOf = "PartOf"
-    RealizedBy = "RealizedBy"
-    OppositeOf = "OppositeOf"
-    SimilarTo = "SimilarTo"
-    Causes = "Causes"
-    Requires = "Requires"
+SYMMETRIC = "Symmetric"  # holds just as well the other way round
+TRANSITIVE = "Transitive"  # a R b and b R c means a R c
+TAXONOMIC = "Taxonomic"  # the target is a more general kind than the source
 
-
-RELATIONS: Tuple[str, ...] = (
-    Relation.IsA,
-    Relation.InstanceOf,
-    Relation.HasProperty,
-    Relation.PartOf,
-    Relation.RealizedBy,
-    Relation.OppositeOf,
-    Relation.SimilarTo,
-    Relation.Causes,
-    Relation.Requires,
-)
-
-_INVERSE = {
-    Relation.OppositeOf: Relation.OppositeOf,
-    Relation.SimilarTo: Relation.SimilarTo,
-}
+PROPERTIES: Tuple[str, ...] = (SYMMETRIC, TRANSITIVE, TAXONOMIC)
 
 
 @dataclass
@@ -289,26 +278,83 @@ class Knowledge:
         return edge
 
     def related(self, source: str, relation: str) -> List[str]:
+        """Everything reachable from `source` by `relation`.
+
+        How far this walks is not wired in. It reads the relation's own
+        properties, and those are ordinary edges, so telling Soup that some
+        relation is symmetric changes what this returns from then on.
+        """
+        inverses = self.inverses_of(relation)
+        transitive = TRANSITIVE in self.properties_of(relation)
+        out: List[str] = []
+        seen = {source}
+        frontier = [source]
+        while frontier:
+            for nxt in self._step(frontier.pop(0), relation, inverses):
+                if nxt in seen:
+                    continue
+                seen.add(nxt)
+                out.append(nxt)
+                if transitive:
+                    frontier.append(nxt)
+        return out
+
+    def properties_of(self, relation: str) -> Set[str]:
+        """What sort of relation this is: symmetric, transitive, taxonomic.
+
+        Scanned raw rather than through `related`, because deciding whether
+        HasProperty is symmetric would otherwise require deciding whether
+        HasProperty is symmetric.
+        """
+        return {
+            e.target for e in self.edges if e.source == relation and e.relation == HAS_PROPERTY
+        }
+
+    def inverses_of(self, relation: str) -> Set[str]:
+        """Relations saying the same thing the other way round.
+
+        A symmetric relation is its own inverse, which is all symmetry means.
+        """
+        out = {e.target for e in self.edges if e.source == relation and e.relation == INVERSE_OF}
+        out.update(
+            e.source for e in self.edges if e.target == relation and e.relation == INVERSE_OF
+        )
+        if SYMMETRIC in self.properties_of(relation):
+            out.add(relation)
+        return out
+
+    def relations_with(self, prop: str) -> List[str]:
+        """Every relation carrying `prop`."""
+        return sorted(
+            {e.source for e in self.edges if e.relation == HAS_PROPERTY and e.target == prop}
+        )
+
+    def _step(self, source: str, relation: str, inverses: Set[str]) -> List[str]:
         out = [e.target for e in self.edges if e.source == source and e.relation == relation]
-        inverse = _INVERSE.get(relation)
-        if inverse:
-            out.extend(
-                e.source for e in self.edges if e.target == source and e.relation == inverse
-            )
+        for e in self.edges:
+            if e.target == source and e.relation in inverses and e.source not in out:
+                out.append(e.source)
         return out
 
     def edges_for(self, name: str) -> List[Edge]:
         return [e for e in self.edges if e.source == name or e.target == name]
 
     def ancestors(self, name: str, _seen: Optional[set] = None) -> List[str]:
+        """The kinds `name` falls under, by whichever relations claim to say so.
+
+        Which relations those are is itself asserted knowledge, so a relation
+        taught this afternoon joins the taxonomy as soon as someone says it
+        is taxonomic.
+        """
         seen = _seen if _seen is not None else set()
         out: List[str] = []
-        for parent in self.related(name, Relation.IsA) + self.related(name, Relation.InstanceOf):
-            if parent in seen:
-                continue
-            seen.add(parent)
-            out.append(parent)
-            out.extend(self.ancestors(parent, seen))
+        for relation in self.relations_with(TAXONOMIC):
+            for parent in self.related(name, relation):
+                if parent in seen:
+                    continue
+                seen.add(parent)
+                out.append(parent)
+                out.extend(self.ancestors(parent, seen))
         return out
 
     def is_a(self, name: str, kind: str) -> bool:
@@ -331,7 +377,22 @@ class Knowledge:
         self.facts.append(fact)
         for name in _mentioned(proposition):
             self.define(name)
+        self._absorb_property(fact)
         return fact
+
+    def _absorb_property(self, fact: Fact) -> None:
+        """"PartOf is transitive" is a claim about how to walk the graph.
+
+        The ears have no reason to treat it as anything but another IsA, so
+        catch the ones naming a traversal property and mirror them onto an
+        edge, which is where `related` will look.
+        """
+        p = fact.proposition
+        if not fact.truth or not isinstance(p, Call) or p.concept != "IsA":
+            return
+        subject, kind = p.get("subject"), p.get("kind")
+        if isinstance(subject, Call) and isinstance(kind, Call) and kind.concept in PROPERTIES:
+            self.relate(subject.concept, HAS_PROPERTY, kind.concept, fact.evidence)
 
     def query(self, pattern: Expr) -> List[Tuple[Fact, Dict[str, Expr]]]:
         """Every fact matching `pattern`, with the bindings that made it match."""
@@ -361,7 +422,7 @@ class Knowledge:
             params=tuple(a.value.name for a in head.args if isinstance(a.value, Var)),
             learned=True,
         )
-        self.relate(head.concept, Relation.RealizedBy, _body_head(body))
+        self.relate(head.concept, "RealizedBy", _body_head(body))
         return rule
 
     def rules_for(self, concept: str) -> List[Rule]:

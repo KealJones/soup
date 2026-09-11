@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 
 from .discourse import Discourse
 from .expr import Arg, Call, Expr, Lit, Seq, Var, call, render
-from .knowledge import Knowledge, Relation
+from .knowledge import Knowledge
 from .parse import ParseError, looks_like_expression, parse, parse_definition
 
 __all__ = ["Ears", "Heard", "tokenize"]
