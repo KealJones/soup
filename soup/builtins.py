@@ -665,8 +665,35 @@ def _request(ctx: Context, c: Call) -> Optional[Expr]:
     return Call("Answer", (Arg("value", value), Arg("to", action)))
 
 
+@native("What", "Who", "Which")
+def _wh(ctx: Context, c: Call) -> Optional[Expr]:
+    """"what is the boiling point of water" is answered by the boiling point.
+
+    The wh-word marks the sentence as a question; it is not itself a further
+    question. So once the thing it wraps has an answer, the wh-word has
+    nothing left to add and gets out of the way.
+    """
+    inner = c.get("proposition")
+    if inner is not None and not isinstance(inner, Call):
+        return inner
+    return None
+
+
+@native("Identity")
+def _identity(ctx: Context, c: Call) -> Optional[Expr]:
+    """Who someone is.
+
+    Asked about Soup it is a finished answer and the mouth has the words for
+    it. Asked about anybody else it is an ordinary question, so return
+    nothing and let facts, then the model, have a go.
+    """
+    subject = c.first("subject", "of")
+    if isinstance(subject, Call) and subject.concept in ("Assistant", "User"):
+        return c
+    return None
+
+
 @native(
-    "Identity",
     "Capability",
     "State",
     "Explanation",
@@ -841,6 +868,8 @@ _KINDS = {
         "BiggerThan",
         "PartOf",
         "IsA",
+        "Is",
+        "Was",
         "InstanceOf",
         "OppositeOf",
         "SimilarTo",

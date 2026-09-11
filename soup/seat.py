@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import List, Optional
 
-from .expr import Expr
+from .expr import Call, Expr, Lit, Seq, render
 from .parse import ParseError, parse
 
 __all__ = ["Seat", "seat_from_env"]
@@ -91,6 +92,37 @@ double it
 Request(action=Double(Ref("it")))'''
 
 
+_ANSWERING = '''You answer questions written as Soup concept expressions.
+Reply with exactly one concept expression and nothing else: no prose, no code
+fences, no explanation.
+
+SYNTAX
+  "text"  42  3.14  [1, 2, 3]        literal text, numbers, lists
+  Concept(name=Value)                a concept applied to named arguments
+
+Answer with a literal wherever a literal will do. Keep it to one short
+sentence of text at most.
+
+Never repeat the question back. Never wrap the answer in the concept you
+were asked about. Just the answer on its own.
+
+If you do not know, or the question has no factual answer, reply exactly:
+Unknown()
+
+EXAMPLES
+  asked Identity(subject=AlbertEinstein())
+  reply "a german-born physicist who came up with relativity"
+
+  asked Capital(of=France())
+  reply "Paris"
+
+  asked Age(subject=User())
+  reply Unknown()
+
+  asked Population(subject=Tokyo())
+  reply 37000000'''
+
+
 class Seat:
     """A model sitting in the ears, used only for what constructions miss."""
 
@@ -123,10 +155,18 @@ class Seat:
         if reply is None:
             return None
         try:
-            return parse(_clean(reply))
+            heard = parse(_clean(reply))
         except (ParseError, ValueError, IndexError):
             self.last_error = "unparseable: %s" % reply[:120]
             return None
+        invented = _unfaithful(heard, utterance, vocabulary or [])
+        if invented:
+            # Small models will cheerfully answer "who is albert einstein"
+            # with a concept named Alice. The ears are allowed to be baffled;
+            # they are not allowed to make things up.
+            self.last_error = "invented %s, not in the utterance" % ", ".join(invented)
+            return None
+        return heard
 
     @property
     def native(self) -> bool:
@@ -156,6 +196,42 @@ class Seat:
             "max_tokens": 300,
             "chat_template_kwargs": {"enable_thinking": False},
         }
+
+    def answer(self, expression: str) -> Optional[Expr]:
+        """Ask the model to resolve a concept expression we could not.
+
+        Separate from `hear` on purpose. Hearing is about shape and must not
+        answer anything; this one is about the world and must not reshape
+        the question.
+        """
+        if not self.available:
+            return None
+        reply = self._ask(_ANSWERING, expression)
+        if reply is None:
+            return None
+        answer = _answer_in(reply, expression)
+        if answer is None:
+            self.last_error = "unparseable answer: %s" % reply[:120]
+            return None
+        if isinstance(answer, Call) and answer.concept in ("Unknown", "Nothing"):
+            return None
+        head = expression.split("(", 1)[0]
+        if isinstance(answer, Call) and answer.concept == head:
+            # Models like to restate the question with the answer filled in.
+            # Take the filling; refuse the restatement.
+            inner = answer.get("value") or answer.get("answer")
+            if inner is None:
+                self.last_error = "echoed the question"
+                return None
+            answer = inner
+        if render(answer, False) == expression:
+            self.last_error = "echoed the question"
+            return None
+        if _same_shape(answer, expression):
+            # Relabelling the question is not answering it.
+            self.last_error = "restated the question"
+            return None
+        return answer
 
     def _ask(self, system: str, utterance: str) -> Optional[str]:
         body = json.dumps(self._payload(system, utterance)).encode("utf-8")
@@ -187,8 +263,97 @@ class Seat:
             return None
 
 
-def _clean(reply: str) -> str:
-    """Models like to wrap things in fences and add a sentence of pride."""
+# Shapes the ears are always allowed to reach for, whether or not the word
+# appears in what was said. Mood and structure are ours, not the speaker's.
+_STRUCTURAL = frozenset(
+    [
+        "Question", "Request", "Remember", "Teach", "Seq", "AllOf", "AnyOf",
+        "Ref", "Query", "Unknown", "Identity", "Assertion", "Not", "Value",
+    ]
+)
+
+
+def _camel_words(name: str) -> List[str]:
+    return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*|[a-z]+|\d+", name)]
+
+
+def _concepts(expr: Expr) -> List[str]:
+    found: List[str] = []
+    if isinstance(expr, Call):
+        found.append(expr.concept)
+        for arg in expr.args:
+            found.extend(_concepts(arg.value))
+    elif isinstance(expr, Seq):
+        for item in expr.items:
+            found.extend(_concepts(item))
+    return found
+
+
+def _unfaithful(expr: Expr, utterance: str, vocabulary: List[str]) -> List[str]:
+    """Concept names the model produced that the speaker never said.
+
+    A concept is fair game if we already know it, if it is one of our own
+    structural wrappers, or if the words of its name were actually spoken.
+    Anything else is the model filling silence with invention.
+    """
+    said = set(re.findall(r"[a-z0-9]+", utterance.lower()))
+    known = set(vocabulary) | _STRUCTURAL
+    invented = []
+    for name in _concepts(expr):
+        if name in known:
+            continue
+        if all(w in said for w in _camel_words(name)):
+            continue
+        invented.append(name)
+    return invented
+
+
+def _answer_in(reply: str, question: str) -> Optional[Expr]:
+    """The first line of the reply that is an answer rather than the question.
+
+    Models trained on question/answer pairs will happily restate the question
+    before answering it, so walk the lines instead of trusting the first.
+    """
+    body = _clean(reply, single=False)
+    for line in body.splitlines():
+        line = line.strip().lstrip("-*> ").strip()
+        if line.startswith("reply "):
+            line = line[6:].strip()
+        if not line or line == question:
+            continue
+        try:
+            return parse(_balance(line))
+        except (ParseError, ValueError, IndexError):
+            plain = line.rstrip(".")
+            if plain and len(plain) < 200 and not _refusal(plain):
+                # "100 degrees celsius" is a perfectly good answer that
+                # simply forgot its quotation marks.
+                return Lit(plain)
+    return None
+
+
+def _refusal(line: str) -> bool:
+    low = line.lower()
+    return any(
+        phrase in low
+        for phrase in ("i'm sorry", "i am sorry", "i cannot", "i can't", "as an ai")
+    )
+
+
+def _same_shape(answer: Expr, question: str) -> bool:
+    """Same arguments under a different name. A rename, not an answer."""
+    if not isinstance(answer, Call) or not answer.args:
+        return False
+    inside = question.split("(", 1)[-1].rsplit(")", 1)[0]
+    return render(answer, False).split("(", 1)[-1].rsplit(")", 1)[0] == inside
+
+
+def _clean(reply: str, single: bool = True) -> str:
+    """Models like to wrap things in fences and add a sentence of pride.
+
+    With `single` off, the surviving lines come back whole so the caller can
+    choose between them rather than taking the first that looks right.
+    """
     text = reply.strip()
     while "<think>" in text and "</think>" in text:
         head, _, rest = text.partition("<think>")
@@ -200,6 +365,8 @@ def _clean(reply: str) -> str:
             if text.lower().startswith(("python", "soup", "text")):
                 text = text.split("\n", 1)[-1]
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not single:
+        return "\n".join(lines)
     for line in lines:
         if "(" in line and line[:1].isupper():
             return _balance(line)

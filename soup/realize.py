@@ -127,15 +127,28 @@ class Context:
         self.realizer._record_gap(self.result, Gap(concept, expr, reason))
 
 
+# Argument names that hold a whole thought rather than a thing.
+_PROPOSITIONAL = frozenset(["proposition", "about", "pattern", "action", "to"])
+
+
 class Realizer:
     """Walks a concept expression and resolves as much meaning as it can."""
 
-    def __init__(self, knowledge: Knowledge) -> None:
+    def __init__(self, knowledge: Knowledge, seat=None) -> None:
         self.knowledge = knowledge
+        # Optional model, asked only about things nothing here could resolve.
+        self.seat = seat
+        self._seat_budget = 0
 
     def realize(self, expr: Expr, env: Optional[Dict[str, Expr]] = None) -> Result:
         result = Result(value=expr)
         environment: Dict[str, Expr] = dict(env or {})
+        # One utterance should not turn into a dozen round trips.
+        self._seat_budget = 2
+        # A model is a thing to ask, not a thing to obey. It gets consulted
+        # about questions and stays out of requests and assertions, which
+        # are ours to carry out or to write down.
+        self._asking = isinstance(expr, Call) and expr.concept in ("Question", "Query")
         result.value = self._realize(expr, environment, 0, result)
         return result
 
@@ -219,6 +232,10 @@ class Realizer:
             # value. Names stand for themselves; you cannot fail to evaluate
             # "Greg".
             return evaluated
+
+        asked = self._from_seat(evaluated, result)
+        if asked is not None:
+            return asked
 
         if known_concept:
             # We know this concept, we just do not know this particular thing.
@@ -306,6 +323,38 @@ class Realizer:
         if cd is None:
             return not expr.args
         return cd.kind in ("entity", "thing", "quality", "value", "modality", "relation")
+
+    def _from_seat(self, expr: Call, result: Result) -> Optional[Expr]:
+        """Last resort: ask the model, then write down what it said.
+
+        Only reached once everything we actually know has failed, so the
+        model fills in the world rather than doing arithmetic we can do
+        ourselves. The answer is kept as an ordinary fact marked as coming
+        from a model, which means the same question is only ever asked once
+        and `:facts` shows you where it came from.
+        """
+        if self.seat is None or self._seat_budget <= 0 or not self._asking:
+            return None
+        if any(arg.name in _PROPOSITIONAL for arg in expr.args):
+            # A wrapper around the real question. Whatever it wraps has
+            # already had its turn; asking again just asks worse.
+            return None
+        self._seat_budget -= 1
+        answer = self.seat.answer(render(expr, False))
+        if answer is None:
+            return None
+        if isinstance(answer, Call) and answer.concept in ("Unknown", "Nothing"):
+            return None
+        result.trace.append(
+            "%s -> %s  (asked the model)" % (render(expr, False), render(answer, False))
+        )
+        if not expr.has("value"):
+            self.knowledge.assert_fact(
+                Call(expr.concept, expr.args + (Arg("value", answer),)),
+                True,
+                Evidence(source="llm", confidence=0.6),
+            )
+        return answer
 
     def _record_gap(self, result: Result, gap: Gap) -> None:
         for existing in result.gaps:

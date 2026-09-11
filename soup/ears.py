@@ -1321,6 +1321,9 @@ class Ears:
         clause: Expr = Call(head, tuple(args))
         return _wh_wrap(wh, clause) if wh else clause
 
+    def _all_strange(self, words: List[str]) -> bool:
+        return not any(self.knowledge.knows_concept(concept_name(w)) for w in words)
+
     def _verb_index(self, words: List[str]) -> Optional[int]:
         """Where the noun phrase stops and the predicate starts."""
         i = 0
@@ -1380,6 +1383,7 @@ class Ears:
 
     def _noun_expr(self, words: List[str]) -> Optional[Expr]:
         """A noun phrase as a concept, with its adjectives hung off it."""
+        determined = any(w in _DETERMINERS or w in _POSSESSIVES for w in words)
         words = [w for w in words if w not in _DETERMINERS]
         if not words:
             return None
@@ -1387,6 +1391,11 @@ class Ears:
             return call(_PRONOUN_CONCEPT[words[0]])
         if len(words) == 1 and words[0] in _PRONOUNS:
             return call("Ref", Lit(words[0]))
+        if len(words) > 1 and not determined and self._all_strange(words):
+            # "albert einstein" is one person, not an einstein of type albert.
+            # Without a determiner and without a word we recognise, a run of
+            # nouns is almost always a name.
+            return call("".join(concept_name(w) for w in words))
         head = call(concept_name(_singular(words[-1])))
         modifiers = [call(concept_name(w)) for w in words[:-1]]
         if not modifiers:
@@ -1831,6 +1840,11 @@ def _unpack_copula(rest: List[Arg]) -> Optional[Tuple[Expr, List[Arg]]]:
 
 
 def _wh_wrap(wh: str, inner: Expr) -> Expr:
+    """"who is albert einstein" is asking what he is, not asking about `is`."""
+    if wh in ("who", "what") and isinstance(inner, Call) and inner.concept in ("Is", "Was"):
+        subject = inner.get("subject")
+        if subject is not None and len(inner.args) == 1:
+            return call("Identity", subject=subject)
     return call(concept_name(wh), proposition=inner)
 
 

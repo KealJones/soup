@@ -88,7 +88,7 @@ class Session:
             self.knowledge.load(memory_path)
         self.discourse = Discourse()
         self.ears = Ears(self.knowledge, self.discourse, seat=llm)
-        self.realizer = Realizer(self.knowledge)
+        self.realizer = Realizer(self.knowledge, seat=llm)
         self.mouth = Mouth(self.knowledge, self.discourse, seed=seed)
         self.teacher = Teacher(self.knowledge)
         self.lesson: Optional[Lesson] = None

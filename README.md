@@ -184,18 +184,54 @@ SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat --llm
 
 It is tried only for what the constructions miss, so the common path never
 waits on a model, and it is held to the same contract as the rest of the
-ears: return a concept expression, nothing else. It does not answer the
-question and it does not decide how anything gets done.
+ears: return a concept expression, nothing else. It does not decide how
+anything gets done.
+
+The ears are allowed to be baffled. They are not allowed to make things up,
+and a small model asked "who is albert einstein" will genuinely hand back a
+concept named `Alice`. So every name the model produces has to be one we
+already know, one of our own structural wrappers, or a word the speaker
+actually said. Anything else is thrown out and the sentence falls through to
+the ordinary structural parse.
 
 ```
 you  > make this picture look spooky but still cute
        Request(action=Make(target=Ref("this"), look=AllOf(Spooky(), Cute())))
 soup > i don't know Make. teach me: Make(target=target, look=look) := ...
-
-you  > what is the airspeed velocity of an unladen swallow
-       Question(about=Query(pattern=AirspeedVelocity(subject=UnladenSwallow())))
-soup > i don't have unladen swallow's airspeed velocity
 ```
+
+### Asking, as opposed to guessing
+
+The same model gets a second, separate job. There are two ways to not know
+something, and only one of them is a language problem:
+
+- *I don't know that word.* A hole in the vocabulary. Only you can fill it,
+  so the Teacher asks you.
+- *I don't know that fact.* A hole in the world. Anyone could fill it, and a
+  model is right there.
+
+Soup used to send both to you, which is how "who is albert einstein" turned
+into a request to be taught the verb *to be*. Now a question that nothing
+known can resolve goes to the model first, and the answer is written into the
+store as an ordinary fact with its source recorded:
+
+```
+you  > who is albert einstein?
+       Question(about=Identity(subject=AlbertEinstein()))
+soup > a german-born physicist who came up with relativity
+
+you  > :facts
+       Identity(subject=AlbertEinstein(), value="a german-born ...") [llm]
+```
+
+Because it lands as a fact, it is asked once, it shows up in `:facts` marked
+`[llm]` rather than passing itself off as something you told us, and you can
+contradict it.
+
+Only questions go. A request is ours to carry out or to be taught, and an
+assertion is yours to make, so neither is ever put to the model. Nor is
+arithmetic we can do ourselves: the model is the last thing tried, never the
+first.
 
 Ollama's native `/api/chat` is the default because it is the only endpoint of
 the two that can actually turn thinking off; through the OpenAI-compatible

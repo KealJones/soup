@@ -312,7 +312,9 @@ class TestSeat(unittest.TestCase):
         return s
 
     def test_a_reply_becomes_a_concept_expression(self):
-        heard = self.seat("Remember(proposition=Sat(subject=Cat(), on=Mat()))").hear("x")
+        heard = self.seat("Remember(proposition=Sat(subject=Cat(), on=Mat()))").hear(
+            "the cat sat on the mat"
+        )
         self.assertEqual(render(heard, multiline=False), "Remember(proposition=Sat(subject=Cat(), on=Mat()))")
 
     def test_fences_and_chatter_are_stripped(self):
@@ -322,17 +324,110 @@ class TestSeat(unittest.TestCase):
             "Sure! Here you go:\nQuestion(about=Multiply(6, 4))",
             "<think>hmm, a product</think>Question(about=Multiply(6, 4))",
         ]:
-            heard = self.seat(wrapper).hear("x")
+            heard = self.seat(wrapper).hear("what is 6 times 4", ["Multiply"])
             self.assertEqual(render(heard, multiline=False), "Question(about=Multiply(6, 4))", wrapper)
 
     def test_a_dropped_bracket_is_repaired(self):
-        heard = self.seat("Remember(proposition=Meaning(value=AllOf(Creepy(), Dark())))").hear("x")
+        heard = self.seat("Remember(proposition=Meaning(value=AllOf(Creepy(), Dark())))").hear(
+            "spooky means creepy and dark", ["Meaning"]
+        )
         self.assertIsNotNone(heard)
-        heard = self.seat("Question(about=Multiply(6, 4)").hear("x")
+        heard = self.seat("Question(about=Multiply(6, 4)").hear("what is 6 times 4", ["Multiply"])
         self.assertEqual(render(heard, multiline=False), "Question(about=Multiply(6, 4))")
 
     def test_nonsense_is_declined_rather_than_invented(self):
         self.assertIsNone(self.seat("I'm sorry, I can't help with that.").hear("x"))
+
+    def test_the_ears_may_be_baffled_but_may_not_make_things_up(self):
+        # A real failure: qwen answered "who is albert einstein" with Alice.
+        seat = self.seat("Question(about=Who(subject=Alice(), name=Einstein()))")
+        self.assertIsNone(seat.hear("who is albert einstein?"))
+        self.assertIn("Alice", seat.last_error)
+
+    def test_a_name_that_was_actually_said_is_allowed_through(self):
+        heard = self.seat("Question(about=Identity(subject=AlbertEinstein()))").hear(
+            "who is albert einstein?"
+        )
+        self.assertEqual(render(heard, multiline=False), "Question(about=Identity(subject=AlbertEinstein()))")
+
+    def test_an_answer_is_taken_but_a_restatement_is_not(self):
+        seat = self.seat('Capital(subject=France(), value="Paris")')
+        self.assertEqual(render(seat.answer("Capital(subject=France())"), False), '"Paris"')
+        seat = self.seat("Capital(subject=France())")
+        self.assertIsNone(seat.answer("Capital(subject=France())"))
+
+    def test_a_model_that_does_not_know_says_so(self):
+        self.assertIsNone(self.seat("Unknown()").answer("Age(subject=User())"))
+
+    def test_an_unquoted_answer_is_still_an_answer(self):
+        seat = self.seat("100 degrees celsius")
+        self.assertEqual(render(seat.answer("BoilingPoint(subject=Water())"), False), '"100 degrees celsius"')
+
+    def test_a_question_restated_before_the_answer_is_seen_through(self):
+        seat = self.seat('Capital(subject=France())\n"Paris"')
+        self.assertEqual(render(seat.answer("Capital(subject=France())"), False), '"Paris"')
+
+
+class _Oracle:
+    """A stand-in for a model, so the tests never touch a network."""
+
+    available = True
+
+    def __init__(self, **answers: str) -> None:
+        self.answers = answers
+        self.asked = []
+
+    def hear(self, utterance, vocabulary=None):
+        return None
+
+    def answer(self, expression):
+        self.asked.append(expression)
+        text = self.answers.get(expression.split("(", 1)[0])
+        return Lit(text) if text is not None else None
+
+
+class TestAskingTheModel(unittest.TestCase):
+    """When soup runs out of what it knows, the model gets the question."""
+
+    def test_a_fact_we_lack_is_asked_rather_than_taught(self):
+        oracle = _Oracle(Identity="a physicist")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        said = reply(session, "who is albert einstein?")
+        self.assertIn("physicist", said)
+        self.assertNotIn("teach me", said)
+
+    def test_what_the_model_says_is_written_down_and_not_asked_twice(self):
+        oracle = _Oracle(Capital="Paris")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        self.assertIn("Paris", reply(session, "what is the capital of france"))
+        self.assertIn("Paris", reply(session, "what is the capital of france"))
+        self.assertEqual(len(oracle.asked), 1)
+
+    def test_a_request_is_ours_to_carry_out_not_the_model_s(self):
+        oracle = _Oracle(Make="a spooky picture")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        said = reply(session, "make me a sandwich")
+        self.assertEqual(oracle.asked, [])
+        self.assertIn("teach me", said)
+
+    def test_an_assertion_is_remembered_not_fact_checked(self):
+        oracle = _Oracle(Sat="no it did not")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        reply(session, "the cat sat on the mat")
+        self.assertEqual(oracle.asked, [])
+
+    def test_the_model_is_a_last_resort_not_a_first_one(self):
+        oracle = _Oracle(Multiply="about thirty")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        self.assertIn("24", reply(session, "what is 6 times 4"))
+        self.assertEqual(oracle.asked, [])
+
+    def test_a_silent_model_leaves_the_teacher_to_it(self):
+        oracle = _Oracle()
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        said = reply(session, "what is the flumph of a grobble")
+        self.assertTrue(oracle.asked)
+        self.assertIn("teach me", said)
 
     def test_a_dead_server_disables_the_seat_but_not_the_ears(self):
         seat = Seat(url="http://localhost:9/api/chat", timeout=0.4)
