@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Launcher. Finds a new enough python so you do not have to care which one.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+            exec "$candidate" -m soup "$@"
+        fi
+    fi
+done
+
+echo "soup needs python 3.9 or newer, and could not find one" >&2
+exit 1
