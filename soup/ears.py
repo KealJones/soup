@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .discourse import Discourse
-from .expr import Arg, Call, Expr, Lit, Seq, Var, call, render
+from .expr import Arg, Call, Expr, Lit, Seq, Var, call, concept_names, render
 from .knowledge import Knowledge
 from .parse import ParseError, looks_like_expression, parse, parse_definition
 
@@ -596,25 +596,34 @@ class Ears:
                     best = (score, built, c.pattern, literals)
                 break
 
-        if best is not None:
-            self._commit_observations(best[1])
-            self.discourse.note_meaning(best[1])
-            return Heard(best[1], raw, best[2], literals=best[3])
+        if best is not None and best[3] > 0:
+            # A pattern that recognised actual words. Instant, free, and not
+            # the sort of thing a model improves on.
+            return self._settle(Heard(best[1], raw, best[2], literals=best[3]))
 
+        # Otherwise either nothing matched, or what won was a catch-all that
+        # recognised no words at all and merely imposed a shape. Those are
+        # the sentences a model reads better, which is measurable rather
+        # than a matter of taste: see scripts/compare_ears.py.
         if self.seat is not None:
             guess = self.seat.hear(raw, list(self.knowledge.concepts))
             if guess is not None:
-                self._commit_observations(guess)
-                self.discourse.note_meaning(guess)
-                return Heard(guess, raw, "llm", confidence=0.8)
+                return self._settle(Heard(guess, raw, "llm", confidence=0.8))
+
+        if best is not None:
+            return self._settle(Heard(best[1], raw, best[2], literals=best[3]))
 
         fallback = self._desperate_parse()
         if fallback is not None:
-            self._commit_observations(fallback)
-            self.discourse.note_meaning(fallback)
-            return Heard(fallback, raw, "fallback", confidence=0.5)
+            return self._settle(Heard(fallback, raw, "fallback", confidence=0.5))
 
         return Heard(call("Unintelligible", text=Lit(raw)), raw, "", confidence=0.0)
+
+    def _settle(self, heard: Heard) -> Heard:
+        """Commit whichever reading won, and remember we said it."""
+        self._commit_observations(heard.expr)
+        self.discourse.note_meaning(heard.expr)
+        return heard
 
     # -- pattern matching --------------------------------------------------
     def _match(
@@ -698,8 +707,6 @@ class Ears:
         self._observed.setdefault(name, "thing" if common else "entity")
 
     def _commit_observations(self, expr: Expr) -> None:
-        from .expr import concept_names
-
         for name in concept_names(expr):
             kind = self._observed.get(name)
             if kind:
@@ -805,6 +812,12 @@ class Ears:
                 j += 1
                 continue
             if j < len(self.toks) and self.word(j) in ("and",):
+                break
+            # Words sitting next to each other are a list only when they are
+            # numbers. "add 1 2 3" is three values; "new zealand" is one
+            # place, and reading it as two was turning the capital of New
+            # Zealand into the capital of a list.
+            if not self._numberish(j):
                 break
             nxt = next(self.atom(j), None)
             if nxt is None:
@@ -1026,6 +1039,37 @@ class Ears:
         name = concept_name(w)
         self._observe(name, common=start != i)
         yield call(name), start + 1
+
+        # "the eiffel tower", "mount everest", "the lazy dog". Offered
+        # shortest first, so a longer reading only wins where the shorter
+        # one leaves the rest of the sentence unparseable, and the ordinary
+        # backtracking decides rather than a rule about greed.
+        end = start + 1
+        while end < len(self.toks) and end - start < 4:
+            nxt = self.word(end)
+            if nxt is None or not self._nounish(nxt):
+                break
+            end += 1
+            built = self._noun_expr([self.word(k) for k in range(i, end)])
+            if built is None:
+                break
+            for part in concept_names(built):
+                self._observe(part, common=start != i)
+            yield built, end
+
+    def _numberish(self, i: int) -> bool:
+        w = self.word(i)
+        return w is not None and (bool(_NUMERIC.match(w)) or w in _NUMBER_WORDS)
+
+    def _nounish(self, word: str) -> bool:
+        """Could this word still be part of the noun phrase we are in?"""
+        if word in _STOP_FOR_NOUN or word in _DETERMINERS or word in _PREPOSITIONS:
+            return False
+        if word in _PRONOUNS or word in _AUXILIARIES or word in _SUPERLATIVES:
+            return False
+        if word in _NUMBER_WORDS or _NUMERIC.match(word):
+            return False
+        return _is_wordlike(word) and not _is_verb(word)
 
     def attribute_word(self, i: int) -> Iterator[Tuple[str, int]]:
         w = self.word(i)

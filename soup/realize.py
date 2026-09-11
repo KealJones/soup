@@ -131,20 +131,32 @@ class Context:
 _PROPOSITIONAL = frozenset(["proposition", "about", "pattern", "action", "to"])
 
 
+def _is_noun_phrase(expr: Call) -> bool:
+    """A noun with adjectives hung off it, which is a thing and not a verb.
+
+    `Tower(quality=Eiffel())` was being reported as a gap in the language,
+    as though the speaker had used a word we needed taught, when all they
+    had done was put an adjective in front of a noun.
+    """
+    return bool(expr.args) and all(arg.name == "quality" for arg in expr.args)
+
+
 class Realizer:
     """Walks a concept expression and resolves as much meaning as it can."""
 
-    def __init__(self, knowledge: Knowledge, seat=None) -> None:
+    def __init__(self, knowledge: Knowledge, seat=None, lookup=None) -> None:
         self.knowledge = knowledge
-        # Optional model, asked only about things nothing here could resolve.
+        # Places to ask about things nothing here could resolve, in order of
+        # how much they deserve to be believed. A record beats a guess.
+        self.lookup = lookup
         self.seat = seat
-        self._seat_budget = 0
+        self._outside_budget = 0
 
     def realize(self, expr: Expr, env: Optional[Dict[str, Expr]] = None) -> Result:
         result = Result(value=expr)
         environment: Dict[str, Expr] = dict(env or {})
         # One utterance should not turn into a dozen round trips.
-        self._seat_budget = 2
+        self._outside_budget = 2
         # A model is a thing to ask, not a thing to obey. It gets consulted
         # about questions and stays out of requests and assertions, which
         # are ours to carry out or to write down.
@@ -227,13 +239,14 @@ class Realizer:
             return spread
 
         # Nothing resolved it, so decide what kind of not-knowing this is.
-        if not evaluated.args:
-            # A bare name. An entity, a quality, an operation referred to as a
-            # value. Names stand for themselves; you cannot fail to evaluate
-            # "Greg".
+        if not evaluated.args or _is_noun_phrase(evaluated):
+            # A name, bare or with adjectives on it. An entity, a quality, an
+            # operation referred to as a value. Names stand for themselves;
+            # you cannot fail to evaluate "Greg", and "the lazy dog" is no
+            # more a failed computation than "dog" is.
             return evaluated
 
-        asked = self._from_seat(evaluated, result)
+        asked = self._from_outside(evaluated, result)
         if asked is not None:
             return asked
 
@@ -324,37 +337,50 @@ class Realizer:
             return not expr.args
         return cd.kind in ("entity", "thing", "quality", "value", "modality", "relation")
 
-    def _from_seat(self, expr: Call, result: Result) -> Optional[Expr]:
-        """Last resort: ask the model, then write down what it said.
+    def _from_outside(self, expr: Call, result: Result) -> Optional[Expr]:
+        """Last resort: ask somewhere else, then write down what came back.
 
         Only reached once everything we actually know has failed, so the
-        model fills in the world rather than doing arithmetic we can do
-        ourselves. The answer is kept as an ordinary fact marked as coming
-        from a model, which means the same question is only ever asked once
-        and `:facts` shows you where it came from.
+        outside world fills in facts rather than doing arithmetic we can do
+        ourselves. Sources are tried in order of how much they deserve to be
+        believed: a record of a fact beats a guess at one, so Wikidata goes
+        first and a model only sees what Wikidata had no answer for.
+
+        Whatever comes back is kept as an ordinary fact, tagged with where it
+        came from. So the same question is only asked once, `:facts` shows
+        you which answers were ours and which were borrowed, and you can
+        contradict any of them.
         """
-        if self.seat is None or self._seat_budget <= 0 or not self._asking:
+        if not self._asking or self._outside_budget <= 0:
             return None
         if any(arg.name in _PROPOSITIONAL for arg in expr.args):
             # A wrapper around the real question. Whatever it wraps has
             # already had its turn; asking again just asks worse.
             return None
-        self._seat_budget -= 1
-        answer = self.seat.answer(render(expr, False))
-        if answer is None:
-            return None
-        if isinstance(answer, Call) and answer.concept in ("Unknown", "Nothing"):
-            return None
-        result.trace.append(
-            "%s -> %s  (asked the model)" % (render(expr, False), render(answer, False))
-        )
-        if not expr.has("value"):
-            self.knowledge.assert_fact(
-                Call(expr.concept, expr.args + (Arg("value", answer),)),
-                True,
-                Evidence(source="llm", confidence=0.6),
+        self._outside_budget -= 1
+        for source, tag, note in self._sources():
+            answer = source.answer(expr)
+            if answer is None:
+                continue
+            if isinstance(answer, Call) and answer.concept in ("Unknown", "Nothing"):
+                continue
+            result.trace.append(
+                "%s -> %s  (%s)" % (render(expr, False), render(answer, False), note)
             )
-        return answer
+            if not expr.has("value"):
+                self.knowledge.assert_fact(
+                    Call(expr.concept, expr.args + (Arg("value", answer),)),
+                    True,
+                    Evidence(source=tag, confidence=0.9 if tag == "wikidata" else 0.6),
+                )
+            return answer
+        return None
+
+    def _sources(self):
+        if self.lookup is not None and getattr(self.lookup, "available", True):
+            yield self.lookup, "wikidata", "looked it up"
+        if self.seat is not None and getattr(self.seat, "available", True):
+            yield self.seat, "llm", "asked the model"
 
     def _record_gap(self, result: Result, gap: Gap) -> None:
         for existing in result.gaps:

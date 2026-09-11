@@ -182,10 +182,35 @@ anticipated.
 SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat --llm
 ```
 
-It is tried only for what the constructions miss, so the common path never
-waits on a model, and it is held to the same contract as the rest of the
-ears: return a concept expression, nothing else. It does not decide how
-anything gets done.
+It is held to the same contract as the rest of the ears: return a concept
+expression, nothing else. It does not decide how anything gets done.
+
+Which reading wins is settled by measurement, not taste. `scripts/compare_ears.py`
+runs both over the same sentences and prints only the disagreements:
+
+- Where a construction recognised **actual words**, it wins. It is instant,
+  free, and the model does not improve on it. `is the sky blue` really is
+  better as `Ask(proposition=...)` than the model's `Question(about=...)`.
+- Where nothing matched, or where the winner was a **catch-all that
+  recognised no words at all** and merely imposed a shape, the model wins,
+  and not narrowly. The constructions turn `spooky means creepy and dark`
+  into `Dark(quality=[Spooky(), Means(), Creepy(), And()])`; the model gets
+  `Teach(concept=Spooky(), meaning=AllOf(Creepy(), Dark()))`.
+
+So the catch-alls are no longer the last line of defence, and the answer to
+a badly parsed sentence is no longer a new hand-written pattern.
+
+The prompt is given the concept vocabulary grouped by kind, which is what
+stops a model inventing `Times` and `HowOld` next to the `Multiply` and
+`Age` already sitting there.
+
+The ears are allowed to be baffled. They are not allowed to make things up,
+and a small model asked "who is albert einstein" will genuinely hand back a
+concept named `Alice`. The line drawn is between naming and inventing: a
+model may name a relation you never said, because reading "turn the volume
+down" as `Decrease(target=Volume())` is the paraphrase we want from it, but
+it may not introduce a *thing* that was never mentioned. Heads are free;
+leaves are checked against what was actually spoken.
 
 The ears are allowed to be baffled. They are not allowed to make things up,
 and a small model asked "who is albert einstein" will genuinely hand back a
@@ -212,8 +237,8 @@ something, and only one of them is a language problem:
 
 Soup used to send both to you, which is how "who is albert einstein" turned
 into a request to be taught the verb *to be*. Now a question that nothing
-known can resolve goes to the model first, and the answer is written into the
-store as an ordinary fact with its source recorded:
+known can resolve goes outside, and the answer is written into the store as
+an ordinary fact with its source recorded:
 
 ```
 you  > who is albert einstein?
@@ -229,9 +254,60 @@ Because it lands as a fact, it is asked once, it shows up in `:facts` marked
 contradict it.
 
 Only questions go. A request is ours to carry out or to be taught, and an
-assertion is yours to make, so neither is ever put to the model. Nor is
-arithmetic we can do ourselves: the model is the last thing tried, never the
-first.
+assertion is yours to make, so neither is ever put outside. Nor is arithmetic
+we can do ourselves: outside is the last thing tried, never the first.
+
+### Looking it up, and keeping what comes back
+
+A model asked for a fact will produce something fact-shaped. Wikidata asked
+for a fact produces the fact, or nothing, which is a far more useful pair of
+outcomes. So sources are tried in order of how much they deserve to be
+believed, and a record beats a guess:
+
+```
+./chat --wikidata            # no model needed
+./chat --llm --wikidata      # model reads the sentence, wikidata answers it
+```
+
+```
+you  > when was albert einstein born
+       Question(about=DateOfBirth(subject=AlbertEinstein()))
+soup > 14 march 1879
+```
+
+The model, asked the same thing from memory, said April. That is the whole
+argument for this being in front of it.
+
+The lookup is also the one resolution strategy that **extends the vocabulary
+as a side effect of being used**. Answering that question meant finding out
+that `DateOfBirth` is Wikidata's P569 and that Einstein is Q937, and both are
+worth writing down:
+
+```
+you  > :facts
+       WikidataProperty(name=DateOfBirth(), value="P569")   [wikidata]
+       WikidataId(name=AlbertEinstein(), value="Q937")      [wikidata]
+       DateOfBirth(subject=AlbertEinstein(), value="14 march 1879") [wikidata]
+```
+
+The identifiers are ordinary facts, so the second question about Einstein is
+cheaper than the first. And the concept itself gets *defined*, with
+Wikidata's own description as its gloss, so a word that was a gap five
+seconds ago is one soup can now tell you the meaning of. That is the sense in
+which it teaches itself: not by being told, but by having gone and looked.
+
+Search is a ranking rather than a lookup, so only an exact name counts, label
+before alias. The top property match for "tower" is a Tower Records artist ID
+and for "is" it is a library identifier; taking either would not be a near
+miss, it would be a fabricated fact with a citation attached. A concept soup
+can already act on is never looked up either, so this extends the vocabulary
+without ever quietly reinterpreting it.
+
+Statement rank and end dates are respected, because France has ten capitals
+on record and nine of them stopped some time ago.
+
+With no network the lookup marks itself unavailable and everything carries on
+exactly as before.
 
 Ollama's native `/api/chat` is the default because it is the only endpoint of
 the two that can actually turn thinking off; through the OpenAI-compatible

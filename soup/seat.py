@@ -65,6 +65,15 @@ RULES
    argument names: "the cat sat on the mat" is
    Remember(proposition=Sat(subject=Cat(), on=Mat())).
 4. Use Ref("it") / Ref("that") for pronouns pointing at earlier turns.
+5. Verbs go in their base form: "jumps" and "jumped" are both Jump, "gave"
+   is Give. A concept is the same concept whatever tense it arrived in.
+6. Keep every clause. "sort these and show me the top three" is two things
+   being asked for, so it is Seq(Sort(...), Show(...)), not just the first
+   one. Dropping half a sentence is worse than an awkward reading of it.
+7. Name an attribute as fully as the sentence does. "when was X born" is
+   DateOfBirth(subject=X), never Date(subject=X); "how tall" is Height, not
+   Size. A vague name collides with a different concept and gets answered
+   confidently wrongly, which is the worst outcome available.
 
 EXAMPLES
 what is 6 times 4
@@ -79,6 +88,9 @@ Remember(proposition=Age(subject=Alice(), value=30))
 who has the car
 Question(about=Query(pattern=Has(subject=Who(), object=Car())))
 
+when was albert einstein born
+Question(about=DateOfBirth(subject=AlbertEinstein()))
+
 delete the biggest file in my downloads folder
 Request(action=Delete(target=Maximum(collection=AllOf(kind=File(), within=Downloads()), by=FileSize())))
 
@@ -89,7 +101,50 @@ spooky means creepy and dark
 Teach(concept=Spooky(), meaning=AllOf(Creepy(), Dark()))
 
 double it
-Request(action=Double(Ref("it")))'''
+Request(action=Double(Ref("it")))
+
+she gave him a book yesterday
+Remember(proposition=Give(subject=She(), object=Book(), to=He(), time=Yesterday()))
+
+sort these by size and show me the top three
+Request(action=Seq(Sort(collection=Ref("these"), by=Size()), Show(recipient=User(), object=Top(3))))'''
+
+
+# What each kind of concept is for. The model does much better at reusing a
+# concept when it can see what sort of thing it is looking at.
+_KIND_BLURB = (
+    ("operation", "things that compute a result"),
+    ("relation", "things that hold between two things"),
+    ("attribute", "properties of one thing"),
+    ("quality", "adjectives"),
+    ("entity", "particular named things"),
+    ("thing", "kinds of thing"),
+    ("modality", "how certain or obliged something is"),
+    ("speech", "asking, answering, acknowledging"),
+    ("value", "literals and units"),
+)
+
+_CONVENTIONS = '''ARGUMENT NAMES
+Use these, consistently. They are how the rest of the system reads you.
+  subject=   who or what the thing is about
+  value=     the value of an attribute      Age(subject=Alice(), value=30)
+  object=    what a verb was done to        Has(subject=Greg(), object=Car())
+  kind=      what something is a kind of    IsA(subject=Greg(), kind=Person())
+  quality=   an adjective on a noun         Dog(quality=Lazy())
+  target=    what an action acts on         Delete(target=File())
+  collection= a group being operated over   Count(collection=Files())
+  of=, in=, on=, with=, from=, over=, to=, for=
+             a preposition from the sentence, used as written
+
+A multi-word name is ONE concept: "new zealand" is NewZealand(), "the eiffel
+tower" is EiffelTower(), "albert einstein" is AlbertEinstein(). Never split a
+name into a concept per word, and never make a list out of it.
+
+An adjective on a noun stays an argument: "the lazy dog" is Dog(quality=Lazy()).
+
+"who is X" and "what is X" ask what X is: Question(about=Identity(subject=X)).
+"how tall is X" asks an attribute: Question(about=Height(subject=X)).
+"the P of X" is P(subject=X): Question(about=Capital(subject=France())).'''
 
 
 _ANSWERING = '''You answer questions written as Soup concept expressions.
@@ -143,12 +198,21 @@ class Seat:
         # the same refused socket.
         self.available = True
         self.last_error: str = ""
+        # The concept vocabulary, rendered once. It changes slowly and the
+        # prompt is sent on every utterance, so rebuilding it per turn would
+        # be waste.
+        self.brief: str = ""
+
+    def learn_vocabulary(self, knowledge) -> None:
+        self.brief = vocabulary_brief(knowledge)
 
     def hear(self, utterance: str, vocabulary: Optional[List[str]] = None) -> Optional[Expr]:
         if not self.available:
             return None
-        prompt = _SYSTEM
-        if vocabulary:
+        prompt = _SYSTEM + "\n\n" + _CONVENTIONS
+        if self.brief:
+            prompt += "\n\n" + self.brief
+        elif vocabulary:
             prompt += "\n\nCONCEPTS ALREADY KNOWN (prefer these when they fit):\n"
             prompt += ", ".join(sorted(vocabulary)[:220])
         reply = self._ask(prompt, utterance)
@@ -197,7 +261,7 @@ class Seat:
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
-    def answer(self, expression: str) -> Optional[Expr]:
+    def answer(self, expr: Expr) -> Optional[Expr]:
         """Ask the model to resolve a concept expression we could not.
 
         Separate from `hear` on purpose. Hearing is about shape and must not
@@ -206,6 +270,7 @@ class Seat:
         """
         if not self.available:
             return None
+        expression = render(expr, False)
         reply = self._ask(_ANSWERING, expression)
         if reply is None:
             return None
@@ -277,35 +342,91 @@ def _camel_words(name: str) -> List[str]:
     return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*|[a-z]+|\d+", name)]
 
 
-def _concepts(expr: Expr) -> List[str]:
-    found: List[str] = []
+# Words with no content of their own. A model that renders "him" as He() or
+# "a bit" as Some() is normalising, not inventing.
+_FUNCTION_WORDS = frozenset(
+    """he she it they them him her his hers its their theirs i me my we us our
+    you your this that these those one ones some any all none both each every
+    other another same self thing things someone somebody something anyone
+    anybody anything everyone everything nobody nothing here there now then
+    today yesterday tomorrow true false yes no""".split()
+)
+
+
+def _leaves(expr: Expr) -> List[str]:
+    """Concept names used as bare values, with no arguments of their own.
+
+    These are the names of *things*: entities, qualities, references. A
+    wrongly invented one is a thing the speaker never mentioned, which is
+    the invention that matters.
+    """
     if isinstance(expr, Call):
-        found.append(expr.concept)
+        if not expr.args:
+            return [expr.concept]
+        found: List[str] = []
         for arg in expr.args:
-            found.extend(_concepts(arg.value))
-    elif isinstance(expr, Seq):
+            found.extend(_leaves(arg.value))
+        return found
+    if isinstance(expr, Seq):
+        found = []
         for item in expr.items:
-            found.extend(_concepts(item))
-    return found
+            found.extend(_leaves(item))
+        return found
+    return []
 
 
 def _unfaithful(expr: Expr, utterance: str, vocabulary: List[str]) -> List[str]:
-    """Concept names the model produced that the speaker never said.
+    """Things the model introduced that the speaker never mentioned.
 
-    A concept is fair game if we already know it, if it is one of our own
-    structural wrappers, or if the words of its name were actually spoken.
-    Anything else is the model filling silence with invention.
+    Only the leaves are policed, and deliberately so. A model that reads
+    "turn the volume down" as Decrease(target=Volume()) has named a relation
+    we did not say, which is exactly the paraphrasing we want from it: the
+    sentence has no word "decrease" in it and Decrease is still the right
+    answer. A model that reads "who is albert einstein" as
+    Who(subject=Alice()) has put a person into the sentence who was never in
+    it, and no amount of good intent makes that recoverable.
+
+    So heads may be invented freely and things may not.
     """
     said = set(re.findall(r"[a-z0-9]+", utterance.lower()))
     known = set(vocabulary) | _STRUCTURAL
     invented = []
-    for name in _concepts(expr):
-        if name in known:
+    for name in _leaves(expr):
+        if name in known or name in invented:
             continue
-        if all(w in said for w in _camel_words(name)):
+        words = _camel_words(name)
+        if all(w in said or w in _FUNCTION_WORDS for w in words):
             continue
         invented.append(name)
     return invented
+
+
+def vocabulary_brief(knowledge, per_kind: int = 70) -> str:
+    """The concepts soup already has, grouped so a model can reuse them.
+
+    This is the difference between a model that invents `Times` and `HowOld`
+    alongside the `Multiply` and `Age` we already own, and one that lands on
+    the vocabulary the realizer can actually do something with. A flat
+    alphabetical dump does not achieve that; showing what sort of thing each
+    concept is does.
+    """
+    grouped = {}
+    for name, defined in knowledge.concepts.items():
+        grouped.setdefault(defined.kind, []).append(name)
+
+    lines = ["CONCEPTS SOUP ALREADY KNOWS. Reuse these names wherever they fit."]
+    for kind, blurb in _KIND_BLURB:
+        names = sorted(grouped.get(kind, []))
+        if not names:
+            continue
+        lines.append("%s (%s):" % (kind, blurb))
+        lines.append("  " + ", ".join(names[:per_kind]))
+    lines.append(
+        "Anything not on that list, invent a clear CamelCase name for. "
+        "Inventing is expected; reaching for a concept that means something "
+        "else is not."
+    )
+    return "\n".join(lines)
 
 
 def _answer_in(reply: str, question: str) -> Optional[Expr]:

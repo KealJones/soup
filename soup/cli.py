@@ -8,6 +8,7 @@ import sys
 from typing import List, Optional
 
 from .expr import Call, render
+from .lookup import Wikidata
 from .seat import Seat, seat_from_env
 from .session import DEFAULT_MEMORY, Reply, Session
 
@@ -223,6 +224,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="hand sentences the constructions miss to a local model "
         "(OpenAI-compatible endpoint, $SOUP_LLM_URL, default ollama)",
     )
+    parser.add_argument(
+        "--wikidata",
+        action="store_true",
+        help="look facts up in wikidata, learning the concepts as it goes",
+    )
     args = parser.parse_args(argv)
 
     seat = seat_from_env()
@@ -232,6 +238,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             seat.model = args.llm
 
     session = Session(memory_path=None if args.no_memory else args.memory, llm=seat)
+    if args.wikidata:
+        session.realizer.lookup = Wikidata(session.knowledge)
 
     if args.message:
         reply = session.respond(" ".join(args.message))

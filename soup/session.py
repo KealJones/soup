@@ -81,14 +81,19 @@ class Session:
         memory_path: Optional[str] = DEFAULT_MEMORY,
         seed: Optional[int] = None,
         llm: object = None,
+        lookup: object = None,
     ) -> None:
         self.knowledge = knowledge or fresh_knowledge()
         self.memory_path = memory_path
         if memory_path:
             self.knowledge.load(memory_path)
         self.discourse = Discourse()
+        if llm is not None and hasattr(llm, "learn_vocabulary"):
+            # Show the model the vocabulary once. It is what stops it
+            # inventing Times alongside the Multiply we already have.
+            llm.learn_vocabulary(self.knowledge)
         self.ears = Ears(self.knowledge, self.discourse, seat=llm)
-        self.realizer = Realizer(self.knowledge, seat=llm)
+        self.realizer = Realizer(self.knowledge, seat=llm, lookup=lookup)
         self.mouth = Mouth(self.knowledge, self.discourse, seed=seed)
         self.teacher = Teacher(self.knowledge)
         self.lesson: Optional[Lesson] = None

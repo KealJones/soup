@@ -650,6 +650,13 @@ def _question(ctx: Context, c: Call) -> Optional[Expr]:
         recalled = ctx.realize(Call("Recall", (Arg("about", about),)))
         if isinstance(recalled, Call) and recalled.concept == "Explanation":
             return recalled
+        # We hold nothing about it ourselves, so treat the bare name as the
+        # question it plainly is: what is this thing? That is answerable
+        # from facts, from a lookup or by a model, where a bare name is not.
+        asking = Call("Identity", (Arg("subject", about),))
+        described = ctx.realize(asking)
+        if described != asking:
+            return Call("Answer", (Arg("value", described), Arg("to", about)))
         return unknown(about)
     return Call("Answer", (Arg("value", value), Arg("to", about)))
 

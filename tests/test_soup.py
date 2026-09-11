@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from soup import Seat, Session, fresh_knowledge, parse, parse_definition, render
 from soup.expr import Arg, Call, Lit, Seq, Var, call, match, substitute
 from soup.knowledge import SYMMETRIC, TAXONOMIC, TRANSITIVE, Evidence, Knowledge
+from soup.lookup import Wikidata, _subject_text
 from soup.realize import Realizer
+from soup.seat import vocabulary_brief
 
 
 def reply(session: Session, text: str) -> str:
@@ -352,20 +354,70 @@ class TestSeat(unittest.TestCase):
 
     def test_an_answer_is_taken_but_a_restatement_is_not(self):
         seat = self.seat('Capital(subject=France(), value="Paris")')
-        self.assertEqual(render(seat.answer("Capital(subject=France())"), False), '"Paris"')
+        self.assertEqual(render(seat.answer(parse("Capital(subject=France())")), False), '"Paris"')
         seat = self.seat("Capital(subject=France())")
-        self.assertIsNone(seat.answer("Capital(subject=France())"))
+        self.assertIsNone(seat.answer(parse("Capital(subject=France())")))
 
     def test_a_model_that_does_not_know_says_so(self):
-        self.assertIsNone(self.seat("Unknown()").answer("Age(subject=User())"))
+        self.assertIsNone(self.seat("Unknown()").answer(parse("Age(subject=User())")))
 
     def test_an_unquoted_answer_is_still_an_answer(self):
         seat = self.seat("100 degrees celsius")
-        self.assertEqual(render(seat.answer("BoilingPoint(subject=Water())"), False), '"100 degrees celsius"')
+        self.assertEqual(render(seat.answer(parse("BoilingPoint(subject=Water())")), False), '"100 degrees celsius"')
 
     def test_a_question_restated_before_the_answer_is_seen_through(self):
         seat = self.seat('Capital(subject=France())\n"Paris"')
-        self.assertEqual(render(seat.answer("Capital(subject=France())"), False), '"Paris"')
+        self.assertEqual(render(seat.answer(parse("Capital(subject=France())")), False), '"Paris"')
+
+
+class TestVocabularyBrief(unittest.TestCase):
+    """What the model is told about the concepts soup already has."""
+
+    def test_the_brief_groups_concepts_by_what_they_are(self):
+        brief = vocabulary_brief(fresh_knowledge())
+        self.assertIn("operation", brief)
+        self.assertIn("Multiply", brief)
+        self.assertIn("relation", brief)
+        self.assertIn("IsA", brief)
+
+    def test_the_brief_says_inventing_is_allowed(self):
+        self.assertIn("invent", vocabulary_brief(fresh_knowledge()).lower())
+
+
+class TestFaithfulEars(unittest.TestCase):
+    """A model may name a relation you did not say. It may not add things."""
+
+    def seat(self, reply: str) -> Seat:
+        s = Seat()
+        s._ask = lambda system, utterance: reply
+        return s
+
+    def test_an_invented_relation_is_allowed(self):
+        # "turn down" really does mean Decrease, and the word is not there.
+        heard = self.seat("Request(action=Decrease(target=Volume()))").hear(
+            "turn the volume down"
+        )
+        self.assertIsNotNone(heard)
+
+    def test_an_invented_person_is_not(self):
+        seat = self.seat("Question(about=Who(subject=Alice(), name=Einstein()))")
+        self.assertIsNone(seat.hear("who is albert einstein?"))
+        self.assertIn("Alice", seat.last_error)
+
+    def test_a_pronoun_may_be_tidied_up(self):
+        heard = self.seat("Remember(proposition=Give(subject=She(), to=He()))").hear(
+            "she gave him a book"
+        )
+        self.assertIsNotNone(heard)
+
+
+class TestNounPhrasesAreThings(unittest.TestCase):
+    def test_an_adjective_on_a_noun_is_not_a_gap(self):
+        session = fresh()
+        session.respond("the fox jumps over the lazy dog")
+        result = session.last_result
+        assert result is not None
+        self.assertEqual([g.concept for g in result.gaps], [])
 
 
 class _Oracle:
@@ -380,9 +432,9 @@ class _Oracle:
     def hear(self, utterance, vocabulary=None):
         return None
 
-    def answer(self, expression):
-        self.asked.append(expression)
-        text = self.answers.get(expression.split("(", 1)[0])
+    def answer(self, expr):
+        self.asked.append(render(expr, multiline=False))
+        text = self.answers.get(expr.concept)
         return Lit(text) if text is not None else None
 
 
@@ -428,6 +480,131 @@ class TestAskingTheModel(unittest.TestCase):
         said = reply(session, "what is the flumph of a grobble")
         self.assertTrue(oracle.asked)
         self.assertIn("teach me", said)
+
+
+# Real payloads, trimmed. Recorded from wikidata.org so the shapes are not
+# invented: see scripts/compare_ears.py for how they were obtained.
+_WIKI = {
+    ("wbsearchentities", "france", "item"): {
+        "search": [{"id": "Q142", "label": "France", "description": "country",
+                    "match": {"type": "label", "text": "France"}}]
+    },
+    ("wbsearchentities", "capital", "property"): {
+        "search": [{"id": "P36", "label": "capital", "description": "seat of government",
+                    "match": {"type": "label", "text": "capital"}}]
+    },
+    ("wbsearchentities", "height", "property"): {
+        "search": [
+            {"id": "P2044", "label": "elevation above sea level",
+             "match": {"type": "alias", "text": "height"}},
+            {"id": "P2048", "label": "height", "description": "vertical length",
+             "match": {"type": "label", "text": "height"}},
+        ]
+    },
+    ("wbsearchentities", "tower", "property"): {
+        "search": [{"id": "P14837", "label": "Tower Records Online artist ID",
+                    "match": {"type": "label", "text": "Tower Records Online artist ID"}}]
+    },
+    ("wbgetclaims", "Q142", "P36"): {
+        "claims": {"P36": [
+            {"rank": "preferred",
+             "mainsnak": {"snaktype": "value", "datavalue": {
+                 "type": "wikibase-entityid", "value": {"id": "Q90"}}}},
+            {"rank": "normal", "qualifiers": {"P582": []},
+             "mainsnak": {"snaktype": "value", "datavalue": {
+                 "type": "wikibase-entityid", "value": {"id": "Q84"}}}},
+        ]}
+    },
+    ("wbgetentities", "Q90", None): {
+        "entities": {"Q90": {"labels": {"en": {"value": "Paris"}}}}
+    },
+}
+
+
+class _OfflineWikidata(Wikidata):
+    """Wikidata with the wire pulled out, answering from recorded payloads."""
+
+    def _get(self, **params):
+        self.calls += 1
+        action = params.get("action")
+        if action == "wbsearchentities":
+            key = (action, params["search"], params["type"])
+        elif action == "wbgetclaims":
+            key = (action, params["entity"], params["property"])
+        else:
+            key = (action, params.get("ids"), None)
+        return _WIKI.get(key)
+
+
+class TestLookingItUp(unittest.TestCase):
+    """Facts out of wikidata, and the vocabulary that comes with them."""
+
+    def setUp(self):
+        self.knowledge = fresh_knowledge()
+        self.wiki = _OfflineWikidata(self.knowledge)
+
+    def test_a_property_of_a_thing_is_found(self):
+        answer = self.wiki.answer(parse("Capital(subject=France())"))
+        self.assertEqual(render(answer, multiline=False), '"Paris"')
+
+    def test_the_capital_that_is_current_wins(self):
+        # France has ten capitals on record; nine of them ended.
+        answer = self.wiki.answer(parse("Capital(subject=France())"))
+        self.assertEqual(render(answer, multiline=False), '"Paris"')
+
+    def test_the_identifiers_are_learned_once(self):
+        self.wiki.answer(parse("Capital(subject=France())"))
+        spent = self.wiki.calls
+        self.wiki.answer(parse("Capital(subject=France())"))
+        self.assertLess(self.wiki.calls - spent, spent)
+        self.assertEqual(self.wiki._recall("WikidataId", "France"), "Q142")
+        self.assertEqual(self.wiki._recall("WikidataProperty", "Capital"), "P36")
+
+    def test_a_concept_it_had_to_look_up_becomes_one_it_knows(self):
+        self.assertFalse(self.knowledge.knows_concept("Capital"))
+        self.wiki.answer(parse("Capital(subject=France())"))
+        self.assertTrue(self.knowledge.knows_concept("Capital"))
+        self.assertIn("government", self.knowledge.concept("Capital").gloss)
+
+    def test_a_label_beats_an_alias(self):
+        # "height" is P2048's label and merely an alias of "elevation above
+        # sea level", and they are not the same question.
+        self.assertEqual(self.wiki._property("Height"), "P2048")
+
+    def test_a_near_miss_is_refused_rather_than_answered(self):
+        # The best property match for "tower" is a Tower Records artist ID.
+        self.assertIsNone(self.wiki._property("Tower"))
+
+    def test_a_multiword_noun_phrase_is_searched_as_words(self):
+        self.assertEqual(_subject_text(parse("Tower(quality=Eiffel())")), "eiffel tower")
+        self.assertEqual(_subject_text(parse("NewZealand()")), "new zealand")
+
+    def test_a_question_is_not_a_name(self):
+        self.assertIsNone(_subject_text(parse("Maximum(collection=Files())")))
+
+    def test_a_record_is_preferred_to_a_guess(self):
+        oracle = _Oracle(Capital="Marseille")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        session.realizer.lookup = _OfflineWikidata(session.knowledge)
+        self.assertIn("Paris", reply(session, "what is the capital of france"))
+        self.assertEqual(oracle.asked, [])
+
+    def test_the_model_still_gets_what_wikidata_lacks(self):
+        oracle = _Oracle(Vibe="unmatched")
+        session = Session(memory_path=None, seed=3, llm=oracle)
+        session.realizer.lookup = _OfflineWikidata(session.knowledge)
+        self.assertIn("unmatched", reply(session, "what is the vibe of france"))
+
+    def test_no_network_is_not_an_error(self):
+        wiki = Wikidata(fresh_knowledge(), timeout=0.4, endpoint="http://localhost:9/w/api.php")
+        session = Session(memory_path=None, seed=3)
+        session.realizer.lookup = wiki
+        # Nothing local resolves this, so the lookup is really attempted.
+        said = reply(session, "what is the capital of france")
+        self.assertFalse(wiki.available)
+        self.assertNotIn("Traceback", said)
+        # And the next question does not wait on the same refused socket.
+        self.assertIn("24", reply(session, "what is 6 times 4"))
 
     def test_a_dead_server_disables_the_seat_but_not_the_ears(self):
         seat = Seat(url="http://localhost:9/api/chat", timeout=0.4)
