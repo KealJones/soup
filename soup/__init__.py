@@ -17,6 +17,7 @@ from .expr import Call, Expr, Lit, Seq, Var, call, render
 from .knowledge import Evidence, Knowledge, Rule
 from .mouth import Mouth
 from .parse import parse, parse_definition
+from .seat import Seat, seat_from_env
 from .realize import Gap, Realizer, Result
 from .session import Reply, Session
 from .teacher import Teacher

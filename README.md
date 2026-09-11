@@ -107,7 +107,8 @@ That is a much better question than "what does this whole sentence mean".
 | `knowledge.py` | concepts, relations, remembered facts, taught rules, persistence |
 | `realize.py` | resolves an expression as far as it can and records what it could not |
 | `builtins.py` | the starting vocabulary and the realizations that bottom out in code |
-| `ears.py` | English to concepts: a construction grammar with typed, backtracking slots |
+| `ears.py` | English to concepts: a construction grammar with typed, backtracking slots, then word order |
+| `seat.py` | optional local model, tried only for the sentences constructions miss |
 | `mouth.py` | concepts to casual English |
 | `teacher.py` | turns a gap into a question, and an answer into a realization |
 | `discourse.py` | what "it" and "that" currently point at |
@@ -152,6 +153,56 @@ carry a taxonomy.
 relations behave is asserted knowledge, editable at runtime and saved with the
 rest of memory.
 
+### Nothing is unintelligible
+
+The ears always return structure. If no construction matches, word order is
+still there to be read, so a noun phrase, a verb and its prepositions come
+back as a concept expression whatever the words happen to be:
+
+```
+the cat sat on the mat   ->  Remember(proposition=Sat(subject=Cat(), on=Mat()))
+she gave him a book      ->  Remember(proposition=Gave(subject=Her(), recipient=Him(), object=Book()))
+asdkjh qwe zzz           ->  Remember(proposition=Qwe(subject=Asdkjh(), object=Zzz()))
+```
+
+Prepositions make the argument names, which keeps the shape of the original
+sentence. A verb nobody has ever heard of is not a failure, it is a concept
+with a signature, and that is precisely what the Teacher asks about.
+
+### The seat
+
+Constructions are fast, free and never confidently wrong, but they only cover
+sentences somebody wrote a pattern for. A *seat* is somewhere a model can sit
+and do the one job it is plainly better at: reading a sentence nobody
+anticipated.
+
+```
+./chat --llm
+./chat --llm qwen3.5:4b
+SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat --llm
+```
+
+It is tried only for what the constructions miss, so the common path never
+waits on a model, and it is held to the same contract as the rest of the
+ears: return a concept expression, nothing else. It does not answer the
+question and it does not decide how anything gets done.
+
+```
+you  > make this picture look spooky but still cute
+       Request(action=Make(target=Ref("this"), look=AllOf(Spooky(), Cute())))
+soup > i don't know Make. teach me: Make(target=target, look=look) := ...
+
+you  > what is the airspeed velocity of an unladen swallow
+       Question(about=Query(pattern=AirspeedVelocity(subject=UnladenSwallow())))
+soup > i don't have unladen swallow's airspeed velocity
+```
+
+Ollama's native `/api/chat` is the default because it is the only endpoint of
+the two that can actually turn thinking off; through the OpenAI-compatible
+one a reasoning model spends fifty seconds on a single line of syntax instead
+of two. Any OpenAI-shaped server works, it is all stdlib `urllib`, and no
+server running just means no seat.
+
 ### Teaching it things
 
 Three ways, all equivalent once they land:
@@ -168,18 +219,23 @@ restarts. `:rules` shows them.
 ## Limits, honestly
 
 The grammar is a construction grammar, not a parser with a linguistics
-department behind it. It handles arithmetic, collections, attributes of
-people and things, comparatives, wh-questions, yes/no questions with
+department behind it. Constructions cover arithmetic, collections, attributes
+of people and things, comparatives, wh-questions, yes/no questions with
 subject-aux inversion, imperatives, modals, pronouns across turns, and
-definitions. It will not handle relative clauses, coordination inside
-arguments, tense, or most of the ways a real sentence can go. When it misses,
-it says so rather than guessing, which is the tradeoff: a model-backed ears
-module would understand far more and be confidently wrong far more often.
+definitions. Past that it falls back to word order, which reads a plain
+transitive sentence well and gets steadily vaguer as the grammar gets harder:
+relative clauses, tense and coordination inside an argument all come back
+flatter than they went in. Turning the seat on is the answer to that, and the
+honest reason it exists.
 
-Saying so accurately matters more than it sounds. A sentence Soup parsed but
-cannot answer gets "i don't know what the time is"; only a sentence it truly
-could not parse gets "i didn't catch that". Blaming the speaker for a hole in
-your own vocabulary is the most annoying thing a program can do.
+Nothing is reported as misheard any more, which cuts both ways: Soup will now
+hand you a structure for a sentence it understood only loosely. Confidence on
+`Heard` is the thing to watch, not the presence of a parse.
+
+Distinguishing the kinds of not-knowing still matters. A sentence Soup parsed
+but cannot answer gets "i don't know what the time is"; blaming the speaker
+for a hole in your own vocabulary is the most annoying thing a program can
+do.
 
 The clock is the one thing Soup reads from outside its own memory, because
 "i don't know what time it is" is a silly answer.

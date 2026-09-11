@@ -542,9 +542,11 @@ class Heard:
 
 
 class Ears:
-    def __init__(self, knowledge: Knowledge, discourse: Discourse) -> None:
+    def __init__(self, knowledge: Knowledge, discourse: Discourse, seat=None) -> None:
         self.knowledge = knowledge
         self.discourse = discourse
+        # Optional LLM seat, tried only for what the constructions miss.
+        self.seat = seat
         self.toks: List[Tok] = []
         self.question = False
         self.constructions = _build_constructions()
@@ -598,6 +600,13 @@ class Ears:
             self._commit_observations(best[1])
             self.discourse.note_meaning(best[1])
             return Heard(best[1], raw, best[2], literals=best[3])
+
+        if self.seat is not None:
+            guess = self.seat.hear(raw, list(self.knowledge.concepts))
+            if guess is not None:
+                self._commit_observations(guess)
+                self.discourse.note_meaning(guess)
+                return Heard(guess, raw, "llm", confidence=0.8)
 
         fallback = self._desperate_parse()
         if fallback is not None:
@@ -1215,6 +1224,11 @@ class Ears:
         for expr, end in self.value(0):
             if end == len(self.toks):
                 return call("Question", about=expr) if self.question else expr
+        # Word order beats the remaining salvage rules, which will happily
+        # read "she gave him a book" as a call to She().
+        structural = self._structural_parse()
+        if structural is not None:
+            return structural
         for expr, end in self.proposition(0):
             if end == len(self.toks):
                 return call("Remember", proposition=expr)
@@ -1222,6 +1236,163 @@ class Ears:
             if end == len(self.toks):
                 return call("Request", action=expr)
         return None
+
+    # -- the parse that always returns something ---------------------------
+    def _structural_parse(self) -> Optional[Expr]:
+        """Read the shape of the sentence even when none of the words land.
+
+        No construction matched and the grammar could not consume the whole
+        utterance, but English word order is still there to be read: a noun
+        phrase, a verb, then whatever the prepositions attach to it. Giving
+        that back as structure is strictly better than shrugging, because a
+        verb we have never met becomes a concept the Teacher can ask about,
+        and an unknown word is the one problem this whole system is for.
+        """
+        words = [t.word.lower() for t in self.toks]
+        if not words:
+            return None
+
+        mood = self._mood(words)
+        clauses = [c for c in self._split_clauses(words) if c]
+        built = [self._clause_expr(c) for c in clauses]
+        built = [b for b in built if b is not None]
+        if not built:
+            return None
+        body = built[0] if len(built) == 1 else Seq(tuple(built))
+
+        if mood == "question":
+            return call("Question", about=body)
+        if mood == "imperative":
+            return call("Request", action=body)
+        return call("Remember", proposition=body)
+
+    def _mood(self, words: List[str]) -> str:
+        if self.question or words[0] in _WH_WORDS or words[0] in _AUXILIARIES:
+            return "question"
+        if _is_verb(words[0]) and words[0] not in _AUXILIARIES:
+            return "imperative"
+        return "declarative"
+
+    def _split_clauses(self, words: List[str]) -> List[List[str]]:
+        """Break on coordinators, but only where both halves have a verb."""
+        for i, w in enumerate(words):
+            if w not in ("and", "then", "but"):
+                continue
+            left, right = words[:i], words[i + 1 :]
+            if any(_is_verb(x) for x in left) and any(_is_verb(x) for x in right):
+                return [left] + self._split_clauses(right)
+        return [words]
+
+    def _clause_expr(self, words: List[str]) -> Optional[Expr]:
+        words = [w for w in words if w not in _POLITENESS]
+        wh = None
+        if words and words[0] in _WH_WORDS:
+            wh, words = words[0], words[1:]
+        # "does the cat sit" carries no more meaning than "the cat sit".
+        if words and words[0] in _DUMMY_AUX:
+            words = words[1:]
+        if not words:
+            return call(concept_name(wh)) if wh else None
+
+        verb_at = self._verb_index(words)
+        if verb_at is None:
+            inner = self._noun_expr(words)
+            return _wh_wrap(wh, inner) if wh else inner
+
+        subject = self._noun_expr(words[:verb_at]) if verb_at else None
+        head = _verb_concept(words[verb_at])
+        rest = self._arguments(words[verb_at + 1 :])
+        if subject is None and words[verb_at] in _AUXILIARIES:
+            # "is the sky blue": the auxiliary jumped over its own subject,
+            # and with nothing between them the noun phrase swallowed the
+            # complement too.
+            unpacked = _unpack_copula(rest)
+            if unpacked is not None:
+                subject, rest = unpacked
+            elif rest:
+                subject, rest = rest[0].value, rest[1:]
+                rest = [
+                    Arg("object" if a.name == "recipient" else a.name, a.value) for a in rest
+                ]
+        args: List[Arg] = []
+        if subject is not None:
+            args.append(Arg("subject", subject))
+        args.extend(rest)
+        clause: Expr = Call(head, tuple(args))
+        return _wh_wrap(wh, clause) if wh else clause
+
+    def _verb_index(self, words: List[str]) -> Optional[int]:
+        """Where the noun phrase stops and the predicate starts."""
+        i = 0
+        while i < len(words):
+            if _is_verb(words[i]):
+                return i
+            i = self._np_end(words, i)
+        return None
+
+    def _np_end(self, words: List[str], i: int) -> int:
+        """Just past the noun phrase beginning at `i`."""
+        j = i
+        if words[j] in _DETERMINERS or words[j] in _POSSESSIVES:
+            j += 1
+        while j < len(words) and j - i < 4:
+            if words[j] in _STOP_FOR_NOUN or words[j] in _PREPOSITIONS or _is_verb(words[j]):
+                break
+            j += 1
+        return max(j, i + 1)
+
+    def _arguments(self, words: List[str]) -> List[Arg]:
+        """Everything after the verb, named by the preposition that introduced it.
+
+        "the cat sat on the mat" gives `on=Mat()`. The preposition is the
+        best label available and it keeps the shape of the original sentence,
+        which is the whole job here.
+        """
+        args: List[Arg] = []
+        bare: List[Expr] = []
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if word in _PREPOSITIONS:
+                if i + 1 >= len(words):
+                    break
+                end = self._np_end(words, i + 1)
+                noun = self._noun_expr(words[i + 1 : end])
+                if noun is not None and not any(a.name == word for a in args):
+                    args.append(Arg(word, noun))
+                i = end
+                continue
+            if word in _STOP_FOR_NOUN and word not in _DETERMINERS:
+                i += 1
+                continue
+            end = self._np_end(words, i)
+            noun = self._noun_expr(words[i:end])
+            if noun is not None:
+                bare.append(noun)
+            i = end
+        # "she gave him a book": with two of them, the first is who got it.
+        names = ["object"] if len(bare) < 2 else ["recipient", "object"]
+        leading = [Arg(n, v) for n, v in zip(names, bare)]
+        spare = bare[len(names) :]
+        if spare:
+            leading.append(Arg("also", spare[0] if len(spare) == 1 else Seq(tuple(spare))))
+        return leading + args
+
+    def _noun_expr(self, words: List[str]) -> Optional[Expr]:
+        """A noun phrase as a concept, with its adjectives hung off it."""
+        words = [w for w in words if w not in _DETERMINERS]
+        if not words:
+            return None
+        if len(words) == 1 and words[0] in _PRONOUN_CONCEPT:
+            return call(_PRONOUN_CONCEPT[words[0]])
+        if len(words) == 1 and words[0] in _PRONOUNS:
+            return call("Ref", Lit(words[0]))
+        head = call(concept_name(_singular(words[-1])))
+        modifiers = [call(concept_name(w)) for w in words[:-1]]
+        if not modifiers:
+            return head
+        quality: Expr = modifiers[0] if len(modifiers) == 1 else Seq(tuple(modifiers))
+        return Call(head.concept, (Arg("quality", quality),))
 
 
 _NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
@@ -1233,11 +1404,15 @@ _NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
 
 
 def _could_be_verb(word: Optional[str]) -> bool:
-    """Brackets, operators and numbers are not verbs, however hopeful we are."""
+    """Brackets, operators and numbers are not verbs, however hopeful we are.
+
+    Neither are pronouns, or "she gave him a book" reads as a call to She().
+    """
     return bool(
         word
         and word[0].isalpha()
         and word not in _STOP_FOR_NOUN
+        and word not in _PRONOUNS
         and not _NUMERIC.match(word)
     )
 
@@ -1565,6 +1740,98 @@ def _attr_for(word: str) -> str:
 def _identity_of(x: Expr) -> Expr:
     """"who is Greg" asks for Greg, and whatever Soup can say about him."""
     return x
+
+
+_WH_WORDS = {"what", "who", "whom", "whose", "where", "when", "why", "how", "which"}
+_AUXILIARIES = {
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "do", "does", "did", "can", "could", "will", "would",
+    "should", "must", "may", "might", "has", "have", "had",
+}
+_DUMMY_AUX = {"do", "does", "did"}
+_POLITENESS = {"please", "kindly"}
+_POSSESSIVES = {"my", "your", "his", "her", "their", "our", "its"}
+_PREPOSITIONS = {
+    "on", "in", "at", "to", "from", "with", "without", "by", "for", "about",
+    "over", "under", "into", "onto", "through", "across", "between", "near",
+    "behind", "beside", "during", "around", "against", "toward", "towards",
+    "of", "off", "up", "down",
+}
+_PRONOUN_CONCEPT = {
+    "i": "User", "me": "User", "my": "User",
+    "we": "User", "us": "User", "our": "User",
+    "you": "Assistant", "your": "Assistant",
+    "he": "Him", "him": "Him", "his": "Him",
+    "she": "Her", "her": "Her",
+    "they": "Them", "them": "Them", "their": "Them",
+}
+
+# Enough verbs to tell where a noun phrase stops. It does not need to be
+# complete: anything unrecognised sitting in verb position is treated as a
+# verb anyway, which is exactly how a word we have never met becomes a
+# concept the Teacher can ask about.
+_VERBS = frozenset(
+    """
+    go goes went gone come comes came get gets got make makes made take takes took
+    put puts give gives gave send sends sent show shows showed find finds found
+    tell tells told say says said see sees saw look looks looked run runs ran
+    sit sits sat stand stands stood turn turns open opens close closes
+    delete deletes move moves jump jumps eat eats ate drink drinks drank
+    buy buys bought sell sells sold read reads write writes wrote
+    play plays work works live lives want wants need needs think thinks thought
+    bark barks sing sings fly flies flew swim swims drive drives drove
+    rain rains help helps call calls ask asks answer answers sort sorts
+    count counts pick picks choose chooses keep keeps leave leaves left
+    start starts stop stops try tries use uses build builds break breaks broke
+    wear wears wore feel feels felt bring brings brought hold holds held
+    meet meets met pay pays paid sleep sleeps slept walk walks talk talks
+    """.split()
+)
+
+# Words that end in -ing or -ed without being verbs.
+_NOT_VERBS = {
+    "thing", "things", "something", "anything", "nothing", "everything",
+    "king", "ring", "string", "spring", "morning", "evening", "ceiling",
+    "building", "meeting", "bed", "red", "shed", "wed", "speed", "weed",
+    "during", "nothing", "sibling", "darling",
+}
+
+
+def _is_verb(word: str) -> bool:
+    w = word.lower()
+    if w in _NOT_VERBS:
+        return False
+    if w in _AUXILIARIES or w in _VERBS or w in _TRANSITIVE or w in _IRREGULAR_STEM:
+        return True
+    if len(w) > 4 and w.endswith("ing"):
+        return True
+    return len(w) > 3 and w.endswith("ed")
+
+
+def _verb_concept(word: str) -> str:
+    w = word.lower()
+    if w in _IRREGULAR_STEM:
+        return _IRREGULAR_STEM[w]
+    return concept_name(_lemma(w))
+
+
+def _unpack_copula(rest: List[Arg]) -> Optional[Tuple[Expr, List[Arg]]]:
+    """"the sky blue" is a subject and a complement, not one odd noun."""
+    if len(rest) != 1 or rest[0].name != "object":
+        return None
+    inner = rest[0].value
+    if not isinstance(inner, Call) or len(inner.args) != 1:
+        return None
+    if inner.args[0].name != "quality":
+        return None
+    quality = inner.args[0].value
+    if not isinstance(quality, Call) or quality.args:
+        return None
+    return quality, [Arg("value", call(inner.concept))]
+
+
+def _wh_wrap(wh: str, inner: Expr) -> Expr:
+    return call(concept_name(wh), proposition=inner)
 
 
 _NOT_A_VERB = {

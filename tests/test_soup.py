@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from soup import Session, fresh_knowledge, parse, parse_definition, render
+from soup import Seat, Session, fresh_knowledge, parse, parse_definition, render
 from soup.expr import Arg, Call, Lit, Seq, Var, call, match, substitute
 from soup.knowledge import SYMMETRIC, TAXONOMIC, TRANSITIVE, Evidence, Knowledge
 from soup.realize import Realizer
@@ -277,8 +277,76 @@ class TestEars(unittest.TestCase):
     def test_brackets_are_never_verbs(self):
         self.assertEqual(meaning(self.session, "sort [3,1]"), "Request(action=Sort([3, 1]))")
 
-    def test_gibberish_is_admitted_not_guessed(self):
-        self.assertIn("catch", reply(self.session, "asdkjh qwe zzz").lower() + "x")
+    def test_unknown_words_still_get_a_shape(self):
+        """Word order is readable even when not one word is."""
+        self.assertEqual(
+            meaning(self.session, "asdkjh qwe zzz"),
+            "Remember(proposition=Qwe(subject=Asdkjh(), object=Zzz()))",
+        )
+
+    def test_word_order_survives_an_unknown_vocabulary(self):
+        cases = {
+            "the cat sat on the mat": "Remember(proposition=Sat(subject=Cat(), on=Mat()))",
+            "she gave him a book": (
+                "Remember(proposition=Gave(subject=Her(), recipient=Him(), object=Book()))"
+            ),
+            "please send an email to Dave about the meeting": (
+                "Request(action=Send(object=Email(), to=Dave(), about=Meeting()))"
+            ),
+        }
+        for utterance, expected in cases.items():
+            self.assertEqual(meaning(fresh(), utterance), expected, utterance)
+
+    def test_prepositions_become_argument_names(self):
+        said = meaning(self.session, "the fox jumps over the lazy dog")
+        self.assertIn("over=", said)
+        self.assertIn("subject=Fox()", said)
+
+
+class TestSeat(unittest.TestCase):
+    """The LLM seat, exercised without a model anywhere near it."""
+
+    def seat(self, reply: str) -> Seat:
+        s = Seat()
+        s._ask = lambda system, utterance: reply
+        return s
+
+    def test_a_reply_becomes_a_concept_expression(self):
+        heard = self.seat("Remember(proposition=Sat(subject=Cat(), on=Mat()))").hear("x")
+        self.assertEqual(render(heard, multiline=False), "Remember(proposition=Sat(subject=Cat(), on=Mat()))")
+
+    def test_fences_and_chatter_are_stripped(self):
+        for wrapper in [
+            "```\nQuestion(about=Multiply(6, 4))\n```",
+            "```python\nQuestion(about=Multiply(6, 4))\n```",
+            "Sure! Here you go:\nQuestion(about=Multiply(6, 4))",
+            "<think>hmm, a product</think>Question(about=Multiply(6, 4))",
+        ]:
+            heard = self.seat(wrapper).hear("x")
+            self.assertEqual(render(heard, multiline=False), "Question(about=Multiply(6, 4))", wrapper)
+
+    def test_a_dropped_bracket_is_repaired(self):
+        heard = self.seat("Remember(proposition=Meaning(value=AllOf(Creepy(), Dark())))").hear("x")
+        self.assertIsNotNone(heard)
+        heard = self.seat("Question(about=Multiply(6, 4)").hear("x")
+        self.assertEqual(render(heard, multiline=False), "Question(about=Multiply(6, 4))")
+
+    def test_nonsense_is_declined_rather_than_invented(self):
+        self.assertIsNone(self.seat("I'm sorry, I can't help with that.").hear("x"))
+
+    def test_a_dead_server_disables_the_seat_but_not_the_ears(self):
+        seat = Seat(url="http://localhost:9/api/chat", timeout=0.4)
+        session = Session(memory_path=None, seed=2, llm=seat)
+        self.assertIn("24", reply(session, "what is 6 times 4"))
+        said = reply(session, "the cat sat on the mat")
+        self.assertFalse(seat.available)
+        self.assertNotIn("catch", said)
+
+    def test_endpoint_shape_follows_the_url(self):
+        self.assertTrue(Seat(url="http://h/api/chat").native)
+        self.assertFalse(Seat(url="http://h/v1/chat/completions").native)
+        payload = Seat(url="http://h/api/chat")._payload("s", "u")
+        self.assertIs(payload["think"], False)
 
 
 class TestConversation(unittest.TestCase):
@@ -316,11 +384,13 @@ class TestConversation(unittest.TestCase):
         self.assertNotIn("past me", said)
         self.assertTrue("know" in said or "no idea" in said, said)
 
-    def test_gibberish_is_still_admitted_as_unheard(self):
-        said = reply(self.session, "asdkjh qwe zzz")
-        self.assertTrue(
-            "catch" in said or "past me" in said or "couldn't turn" in said, said
-        )
+    def test_an_unknown_verb_becomes_something_teachable(self):
+        """A word we have never met is the Teacher's job, not a dead end."""
+        session = fresh(seed=4)
+        said = reply(session, "flumph the widget")
+        self.assertNotIn("catch", said)
+        self.assertNotIn("past me", said)
+        self.assertIn("Flumph", said)
 
     def test_the_clock_answers(self):
         self.assertRegex(reply(self.session, "what time is it?"), r"\d:\d\d")

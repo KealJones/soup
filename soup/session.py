@@ -80,13 +80,14 @@ class Session:
         knowledge: Optional[Knowledge] = None,
         memory_path: Optional[str] = DEFAULT_MEMORY,
         seed: Optional[int] = None,
+        llm: object = None,
     ) -> None:
         self.knowledge = knowledge or fresh_knowledge()
         self.memory_path = memory_path
         if memory_path:
             self.knowledge.load(memory_path)
         self.discourse = Discourse()
-        self.ears = Ears(self.knowledge, self.discourse)
+        self.ears = Ears(self.knowledge, self.discourse, seat=llm)
         self.realizer = Realizer(self.knowledge)
         self.mouth = Mouth(self.knowledge, self.discourse, seed=seed)
         self.teacher = Teacher(self.knowledge)
@@ -109,13 +110,6 @@ class Session:
             reply = Reply(self.mouth.say(expr), heard)
             self._record(utterance, heard, None, reply.said)
             return reply
-
-        if not self._recognised_anything(expr, heard):
-            # Every content word was a mystery, so this is not a concept we
-            # can be taught, it is a sentence we failed to hear.
-            said = self.mouth.say(call("Unintelligible"))
-            self._record(utterance, heard, None, said)
-            return Reply(said, heard)
 
         result = self.realizer.realize(expr)
         self.last_result = result
@@ -207,36 +201,6 @@ class Session:
             gloss=Lit("here is how i got there:"),
             rules=Seq(tuple(steps)),
         )
-
-    def _recognised_anything(self, expr: Expr, heard: Optional[Heard] = None) -> bool:
-        """Did the utterance contain a single scrap of content we understood?
-
-        A greeting counts: it has no content to miss. A sentence made entirely
-        of words we have never seen does not, and saying "teach me Qwe" to
-        that would be worse than admitting we did not follow.
-
-        A construction that matched on its literal words is a different case
-        again. "what is the time" was heard perfectly; not knowing what time
-        is makes it unanswerable, not unintelligible, and claiming otherwise
-        blames the speaker for our own empty vocabulary. Constructions built
-        entirely of slots do not count, because "asdkjh qwe zzz" fits one of
-        those and fitting it proves nothing.
-        """
-        from .expr import Lit, Seq, walk
-
-        if heard is not None and heard.literals > 0:
-            return True
-        for node in walk(expr):
-            if isinstance(node, (Lit, Seq)):
-                return True
-        content = [n for n in _mentions(expr) if n not in _SPEECH_ACTS]
-        if not content:
-            return True
-        for name in content:
-            cd = self.knowledge.concept(name)
-            if cd is not None and cd.kind != "speech":
-                return True
-        return False
 
     def _most_telling(self, gaps: List[Gap]) -> Gap:
         """Prefer the gap with the most structure; it makes the best question."""

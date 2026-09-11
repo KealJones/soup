@@ -8,6 +8,7 @@ import sys
 from typing import List, Optional
 
 from .expr import Call, render
+from .seat import Seat, seat_from_env
 from .session import DEFAULT_MEMORY, Reply, Session
 
 __all__ = ["main", "run_repl"]
@@ -214,9 +215,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--no-memory", action="store_true", help="do not read or write memory")
     parser.add_argument("--show", action="store_true", help="print concept structures as you go")
+    parser.add_argument(
+        "--llm",
+        nargs="?",
+        const="",
+        metavar="MODEL",
+        help="hand sentences the constructions miss to a local model "
+        "(OpenAI-compatible endpoint, $SOUP_LLM_URL, default ollama)",
+    )
     args = parser.parse_args(argv)
 
-    session = Session(memory_path=None if args.no_memory else args.memory)
+    seat = seat_from_env()
+    if args.llm is not None:
+        seat = seat or Seat()
+        if args.llm:
+            seat.model = args.llm
+
+    session = Session(memory_path=None if args.no_memory else args.memory, llm=seat)
 
     if args.message:
         reply = session.respond(" ".join(args.message))
