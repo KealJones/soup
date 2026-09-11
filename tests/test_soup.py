@@ -104,6 +104,13 @@ class TestRealization(unittest.TestCase):
         result = self.realize("Map(collection=[1, 2], transformation=Multiply(10))")
         self.assertEqual(result.value, Seq((Lit(10), Lit(20))))
 
+    def test_operations_distribute_over_collections(self):
+        result = self.realize("Add([1, 2, 3], 10)")
+        self.assertEqual(result.value, Seq((Lit(11), Lit(12), Lit(13))))
+
+    def test_distribution_leaves_single_argument_operations_alone(self):
+        self.assertEqual(self.realize("Add(collection=[1, 2, 3])").value, Lit(6))
+
     def test_unknown_concept_becomes_a_gap(self):
         result = self.realize("MostAdorable(collection=[1, 2])")
         self.assertEqual([g.concept for g in result.gaps], ["MostAdorable"])
@@ -217,6 +224,18 @@ class TestEars(unittest.TestCase):
 
     def test_raw_concept_syntax_is_accepted(self):
         self.assertEqual(meaning(self.session, "Multiply(3, 4)"), "Multiply(3, 4)")
+
+    def test_decimals_survive_tokenizing(self):
+        self.assertEqual(
+            meaning(self.session, "what is 3.5 plus 1.5"), "Question(about=Add(3.5, 1.5))"
+        )
+
+    def test_bare_collections_and_operators(self):
+        self.assertEqual(meaning(self.session, "[1,2]"), "Question(about=[1, 2])")
+        self.assertEqual(meaning(self.session, "what is 2 * 3"), "Question(about=Multiply(2, 3))")
+
+    def test_brackets_are_never_verbs(self):
+        self.assertEqual(meaning(self.session, "sort [3,1]"), "Request(action=Sort([3, 1]))")
 
     def test_gibberish_is_admitted_not_guessed(self):
         self.assertIn("catch", reply(self.session, "asdkjh qwe zzz").lower() + "x")

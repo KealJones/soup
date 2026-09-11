@@ -285,6 +285,11 @@ _WORD_CONCEPT = {
     "own": "Has",
 }
 
+# Verbs handled by their own branch in `action`. Falling through to the
+# generic "verb plus object" reading would let "remember" swallow a pronoun
+# and file whatever we were last talking about as a fact.
+_OWN_BRANCH = ("remember", "note", "forget", "add", "sum", "subtract", "divide", "multiply")
+
 # Adjectives that name a measurable attribute: "alice is 170 tall".
 _MEASURE_WORDS = ("tall", "old", "heavy", "big", "wide", "long")
 _UNIT_WORDS = ("cm", "centimeters", "inches", "feet", "pounds", "kg", "kilos", "meters")
@@ -394,8 +399,9 @@ def tokenize(source: str) -> Tuple[List[Tok], bool]:
     """Normalise an utterance into tokens. Returns (tokens, was_a_question)."""
     text = source.strip()
     question = "?" in text
-    text = re.sub(r"([\[\]()])", r" \1 ", text)
-    rough = [t for t in re.split(r"[\s,;!?.]+", text) if t]
+    text = re.sub(r"([\[\]()*/+])", r" \1 ", text)
+    # Split on punctuation, but leave the dot in 3.14 alone.
+    rough = [t for t in re.split(r"[\s,;!?]+|(?<!\d)\.|\.(?!\d)", text) if t]
     toks: List[Tok] = []
     for piece in rough:
         low = piece.lower().strip('"')
@@ -412,8 +418,15 @@ def tokenize(source: str) -> Tuple[List[Tok], bool]:
         cleaned = low.strip("'\"")
         if cleaned:
             toks.append(Tok(piece.strip("'\""), cleaned))
-    kept = [t for t in toks if t.word not in _FILLER]
+    kept = [t for t in toks if t.word not in _FILLER and _is_wordlike(t.word)]
     return (kept if kept else toks), question
+
+
+def _is_wordlike(word: str) -> bool:
+    """Emoji and stray punctuation are not tokens we can do anything with."""
+    return bool(word) and (
+        any(c.isalnum() for c in word) or word in ("[", "]", "(", ")", "+", "*", "/", "-")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -742,22 +755,31 @@ class Ears:
                 break
             yield Lit(total), j
 
+    def bracketed(self, i: int) -> Iterator[Tuple[Expr, int]]:
+        """`[1, 2, 3]`, written out literally."""
+        if self.word(i) != "[":
+            return
+        items: List[Expr] = []
+        j = i + 1
+        while j < len(self.toks) and self.word(j) != "]":
+            got = next(self.value(j), None)
+            if got is None:
+                return
+            items.append(got[0])
+            j = got[1]
+            if self.word(j) == "and":
+                j += 1
+        if self.word(j) == "]":
+            yield Seq(tuple(items)), j + 1
+
     def collection(self, i: int) -> Iterator[Tuple[Expr, int]]:
         """A bracketed list, a run of values, or a reference to one."""
-        if self.word(i) == "[":
-            items: List[Expr] = []
-            j = i + 1
-            while j < len(self.toks) and self.word(j) != "]":
-                got = next(self.value(j), None)
-                if got is None:
-                    break
-                items.append(got[0])
-                j = got[1]
-                if self.word(j) == "and":
-                    j += 1
-            if self.word(j) == "]":
-                yield Seq(tuple(items)), j + 1
-                return
+        found = False
+        for items, j in self.bracketed(i):
+            found = True
+            yield items, j
+        if found:
+            return
 
         run: List[Expr] = []
         j = i
@@ -876,6 +898,9 @@ class Ears:
             for inner, j in self.additive(i + 1):
                 if self.word(j) == ")":
                     yield inner, j + 1
+        if self.word(i) == "[":
+            for items, j in self.bracketed(i):
+                yield items, j
         for item in self.number(i):
             yield item
         for item in self.noun_phrase(i):
@@ -898,7 +923,9 @@ class Ears:
                 "collection",
                 "set",
             ):
-                ref = self.discourse.last_collection or self.discourse.last_value
+                # "this list" with no list in the conversation is a dangling
+                # reference, not an excuse to grab the last number we said.
+                ref = self.discourse.last_collection
                 yield (ref if ref is not None else call("Ref", Lit("%s %s" % (w, nxt)))), i + 2
             if w in ("my", "your", "his", "her", "our", "their"):
                 owner = self.discourse.resolve_pronoun(w) or call("User")
@@ -1035,7 +1062,7 @@ class Ears:
                 yield call("WorksAt", subject=subject, object=obj), k
             return
 
-        if w not in _STOP_FOR_NOUN and not _NUMERIC.match(w):
+        if _could_be_verb(w):
             # generic transitive verb: "greg drives the truck"
             concept = _IRREGULAR_STEM.get(w) or concept_name(_lemma(w))
             for obj, k in self.noun_phrase(j + 1):
@@ -1145,7 +1172,7 @@ class Ears:
                 yield call(concept, target), j
 
         # generic imperative verb with an object
-        if w not in _STOP_FOR_NOUN:
+        if _could_be_verb(w) and w not in _OWN_BRANCH:
             concept = _WORD_CONCEPT.get(w) or concept_name(_lemma(w))
             for target, j in self.each_phrase(i + 1):
                 yield call("Map", collection=target, transformation=call(concept)), j
@@ -1200,6 +1227,16 @@ _NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
 # ---------------------------------------------------------------------------
 # word -> concept
 # ---------------------------------------------------------------------------
+
+
+def _could_be_verb(word: Optional[str]) -> bool:
+    """Brackets, operators and numbers are not verbs, however hopeful we are."""
+    return bool(
+        word
+        and word[0].isalpha()
+        and word not in _STOP_FOR_NOUN
+        and not _NUMERIC.match(word)
+    )
 
 
 def concept_name(word: str) -> str:
@@ -1301,8 +1338,16 @@ def _build_constructions() -> List[Construction]:
         lambda b, e: call("Recall", about=b["x"]),
     )
     add(
+        "(tell) (me) (about) (yourself|you)",
+        lambda b, e: call("Question", about=call("Identity", subject=call("Assistant"))),
+    )
+    add(
         "(tell) (me) (about) {x:np}",
         lambda b, e: call("Recall", about=b["x"]),
+    )
+    add(
+        "(what) (are) (you)",
+        lambda b, e: call("Question", about=call("Identity", subject=call("Assistant"))),
     )
     add(
         "(what) (does) {w:word} (mean)",

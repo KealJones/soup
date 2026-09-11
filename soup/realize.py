@@ -209,6 +209,10 @@ class Realizer:
         if inherited is not None:
             return self._realize(inherited, env, depth + 1, result)
 
+        spread = self._distribute(evaluated, env, depth, result)
+        if spread is not None:
+            return spread
+
         # Nothing resolved it, so decide what kind of not-knowing this is.
         if not evaluated.args:
             # A bare name. An entity, a quality, an operation referred to as a
@@ -248,6 +252,34 @@ class Realizer:
             if fn is not None:
                 return Call(parent, expr.args)
         return None
+
+    def _distribute(
+        self, expr: Call, env: Dict[str, Expr], depth: int, result: Result
+    ) -> Optional[Expr]:
+        """An operation handed a collection where it wanted one thing.
+
+        "add 10 to [1, 2, 3]" means do it to each of them. Only for operations
+        we actually know, and only when exactly one argument is a collection,
+        so this never quietly papers over a real mismatch.
+        """
+        cd = self.knowledge.concept(expr.concept)
+        if cd is None or cd.kind != "operation" or len(expr.args) < 2:
+            return None
+        positions = [i for i, a in enumerate(expr.args) if isinstance(a.value, Seq)]
+        if len(positions) != 1:
+            return None
+        index = positions[0]
+        collection = expr.args[index].value
+        assert isinstance(collection, Seq)
+        spread: List[Expr] = []
+        for item in collection.items:
+            args = list(expr.args)
+            args[index] = Arg(args[index].name, item)
+            spread.append(self._realize(Call(expr.concept, tuple(args)), env, depth + 1, result))
+        result.trace.append(
+            "%s applied to each of %d" % (expr.concept, len(collection.items))
+        )
+        return Seq(tuple(spread))
 
     def _from_facts(self, expr: Call) -> Optional[Expr]:
         """Answer straight out of what we believe.

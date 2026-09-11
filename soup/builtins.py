@@ -111,11 +111,15 @@ def _apply_to(transform: Expr, item: Expr) -> Expr:
 def _add(ctx: Context, c: Call) -> Optional[Expr]:
     ns = _numbers(c)
     if ns is None:
-        items = _items(c.first("collection", "of", "items"))
-        if items is not None:
-            vals = [_num(i) for i in items]
-            if all(v is not None for v in vals):
-                return _pack(sum(vals))  # type: ignore[arg-type]
+        # "the sum of those" totals a collection, but only when the collection
+        # is the whole argument. `Add([1,2,3], 10)` means something else and
+        # the distribution step in the realizer handles it.
+        if len(c.args) == 1:
+            items = _items(c.args[0].value)
+            if items is not None:
+                vals = [_num(i) for i in items]
+                if vals and all(v is not None for v in vals):
+                    return _pack(sum(vals))  # type: ignore[arg-type]
         return None
     return _pack(sum(ns))
 
