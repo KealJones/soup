@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-from .expr import Arg, Call, Expr, Lit, Seq, Var, render, substitute
+from .expr import Arg, Call, Expr, Lit, Seq, Var, is_name, render, substitute
 from .knowledge import Evidence, Knowledge
 
 __all__ = ["Gap", "Result", "Realizer", "Context", "native", "NATIVES", "SPECIAL_FORMS"]
@@ -70,6 +70,10 @@ class Result:
     gaps: List[Gap] = field(default_factory=list)
     trace: List[str] = field(default_factory=list)
     effects: List[str] = field(default_factory=list)
+    # Definitions worked out on the spot and kept. Worth telling the person
+    # about: it is the difference between Soup answering them and Soup
+    # getting permanently better at their kind of question.
+    learned: List[str] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -131,14 +135,6 @@ class Context:
 _PROPOSITIONAL = frozenset(["proposition", "about", "pattern", "action", "to"])
 
 
-def _is_noun_phrase(expr: Call) -> bool:
-    """A noun with adjectives hung off it, which is a thing and not a verb.
-
-    `Tower(quality=Eiffel())` was being reported as a gap in the language,
-    as though the speaker had used a word we needed taught, when all they
-    had done was put an adjective in front of a noun.
-    """
-    return bool(expr.args) and all(arg.name == "quality" for arg in expr.args)
 
 
 class Realizer:
@@ -157,6 +153,9 @@ class Realizer:
         environment: Dict[str, Expr] = dict(env or {})
         # One utterance should not turn into a dozen round trips.
         self._outside_budget = 2
+        # Learning is worth more than answering, so it gets a budget of its
+        # own rather than competing with one.
+        self._learn_budget = 2
         # A model is a thing to ask, not a thing to obey. It gets consulted
         # about questions and stays out of requests and assertions, which
         # are ours to carry out or to write down.
@@ -239,12 +238,17 @@ class Realizer:
             return spread
 
         # Nothing resolved it, so decide what kind of not-knowing this is.
-        if not evaluated.args or _is_noun_phrase(evaluated):
+        if is_name(evaluated):
             # A name, bare or with adjectives on it. An entity, a quality, an
             # operation referred to as a value. Names stand for themselves;
             # you cannot fail to evaluate "Greg", and "the lazy dog" is no
             # more a failed computation than "dog" is.
             return evaluated
+
+        if not known_concept:
+            worked_out = self._learn_concept(evaluated, env, depth, result)
+            if worked_out is not None:
+                return worked_out
 
         asked = self._from_outside(evaluated, result)
         if asked is not None:
@@ -336,6 +340,50 @@ class Realizer:
         if cd is None:
             return not expr.args
         return cd.kind in ("entity", "thing", "quality", "value", "modality", "relation")
+
+    def _learn_concept(
+        self, expr: Call, env: Dict[str, Expr], depth: int, result: Result
+    ) -> Optional[Expr]:
+        """Work out what a concept means, rather than what its answer is.
+
+        Deliberately ahead of asking outright, because the two are not the
+        same purchase. An answer is good once. A definition is good forever,
+        and turns every later sentence built on the concept back into
+        ordinary local resolution, offline and free.
+
+        Asked to quintuple ten, a model hands back a number, and a small one
+        will hand back the wrong number. Asked what quintupling *is*, the
+        same model says Multiply(x, 5), which is both right and permanent.
+        Prefer the question that gets easier to answer every time.
+
+        The definition is not trusted for having come from a model. It goes
+        through the same Teacher a human answer would, which throws it out
+        unless it is built from concepts we already have, and files what
+        survives as an ordinary rule anyone can inspect or contradict.
+        """
+        if self.seat is None or not getattr(self.seat, "available", True):
+            return None
+        if self._learn_budget <= 0:
+            return None
+        self._learn_budget -= 1
+        # Imported here because the Teacher is built on top of us.
+        from .teacher import Teacher
+
+        teacher = Teacher(self.knowledge)
+        lesson = teacher.ask(Gap(expr.concept, expr))
+        meaning = self.seat.define(lesson.signature(), list(self.knowledge.concepts))
+        if meaning is None:
+            return None
+        if teacher.learn(lesson, meaning) is None:
+            return None
+        rewritten = self._apply_rules(expr, result)
+        if rewritten is None:
+            # A definition we cannot then apply taught us nothing usable.
+            return None
+        definition = "%s := %s" % (lesson.signature(), render(meaning, False))
+        result.learned.append(definition)
+        result.trace.append("%s  (worked it out)" % definition)
+        return self._realize(rewritten, env, depth + 1, result)
 
     def _from_outside(self, expr: Call, result: Result) -> Optional[Expr]:
         """Last resort: ask somewhere else, then write down what came back.

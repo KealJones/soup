@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from .expr import Arg, Call, Expr, Lit, Seq, Var, call, render, substitute
+from .expr import Arg, Call, Expr, Lit, Seq, Var, call, is_name, render, substitute
 from .knowledge import (
     HAS_PROPERTY,
     SYMMETRIC,
@@ -611,6 +611,21 @@ def _time(ctx: Context, c: Call) -> Optional[Expr]:
     return Lit(datetime.now().strftime("%I:%M %p").lstrip("0").lower())
 
 
+@native("TwentyFourHourTime")
+def _time_24(ctx: Context, c: Call) -> Optional[Expr]:
+    """The other clock face, and the only other one there is.
+
+    Deliberately a single concept rather than a list of the words people use
+    for it. "military time", "army time", "iso time" and "24 hour time" are
+    four names for this, and enumerating them here would mean the fifth name
+    breaks. Mapping a phrase onto this concept is the ears' job, and being
+    told that some new phrase means this is something to learn once and
+    keep.
+    """
+    ctx.effect("read the clock")
+    return Lit(datetime.now().strftime("%H:%M"))
+
+
 @native("Date", "Today")
 def _date(ctx: Context, c: Call) -> Optional[Expr]:
     if c.args:
@@ -645,8 +660,10 @@ def _question(ctx: Context, c: Call) -> Optional[Expr]:
     value = ctx.realize(about)
     if isinstance(value, Call) and value.concept in ("Acknowledged", "Taught", "Explanation"):
         return value
-    if isinstance(value, Call) and not value.args and value == about:
-        # "who is Greg" did not compute anything, so say what we know of him.
+    if isinstance(value, Call) and value == about and is_name(value):
+        # "who is Greg" and "what is military time" did not compute anything,
+        # so say what we know of them rather than handing the name back as
+        # though it were its own answer.
         recalled = ctx.realize(Call("Recall", (Arg("about", about),)))
         if isinstance(recalled, Call) and recalled.concept == "Explanation":
             return recalled
@@ -900,6 +917,8 @@ _KINDS = {
         "FileSize",
         "Location",
         "Job",
+        ("Time", "what time it is now, on an ordinary 12-hour clock"),
+        ("TwentyFourHourTime", "what time it is now, on a 24-hour clock"),
         "Even",
         "Odd",
     ],
@@ -911,6 +930,7 @@ _KINDS = {
         "Answer",
         "Greeting",
         "Farewell",
+        "Laugh",
         "Thanks",
         "Acknowledged",
         "Unknown",

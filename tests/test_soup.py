@@ -419,6 +419,49 @@ class TestNounPhrasesAreThings(unittest.TestCase):
         assert result is not None
         self.assertEqual([g.concept for g in result.gaps], [])
 
+    def test_a_noun_phrase_reads_as_english(self):
+        session = fresh()
+        self.assertIn("the lazy dog", reply(session, "what is a lazy dog"))
+
+    def test_a_name_is_not_its_own_answer(self):
+        # "what is military time" must not be answered with "military time".
+        session = fresh()
+        said = reply(session, "what is a lazy dog")
+        self.assertNotIn("quality", said)
+        self.assertTrue(said.startswith(("i don", "no idea")), said)
+
+    def test_what_we_do_know_about_a_name_still_comes_back(self):
+        session = fresh()
+        reply(session, "greg is a person")
+        self.assertIn("person", reply(session, "who is greg"))
+
+
+class TestTheClock(unittest.TestCase):
+    """A clock face is an argument, not a second question about "time"."""
+
+    def test_the_plain_time_is_a_twelve_hour_clock(self):
+        self.assertRegex(reply(fresh(), "what time is it"), r"\d?\d:\d\d [ap]m")
+
+    def test_a_twenty_four_hour_clock_can_be_asked_for(self):
+        for phrasing in [
+            "what time is it in 24 hour time",
+            "what time is it in military time",
+            "what is the time in 24 hour time",
+        ]:
+            said = reply(fresh(), phrasing)
+            self.assertRegex(said, r"[012]\d:\d\d", phrasing)
+            self.assertNotIn("m", said.split(":")[-1], phrasing)
+
+    def test_a_clock_face_we_cannot_draw_is_admitted_to(self):
+        said = reply(fresh(), "what time is it in swahili")
+        self.assertNotRegex(said, r"\d\d:\d\d")
+
+    def test_laughing_is_not_a_command(self):
+        for joke in ["lol", "haha", "lmao"]:
+            said = reply(fresh(), joke)
+            self.assertNotIn("teach me", said)
+            self.assertNotEqual(said, "Lol")
+
 
 class _Oracle:
     """A stand-in for a model, so the tests never touch a network."""

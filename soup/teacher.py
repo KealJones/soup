@@ -22,7 +22,10 @@ class Lesson:
     def __init__(self, gap: Gap) -> None:
         self.gap = gap
         self.head = _head_for(gap)
-        self.params = [a.name for a in self.head.args if isinstance(a.value, Var)]
+        # The Var's name, not the Arg's. A positional argument has no name of
+        # its own but its placeholder still does, and `Quadruple(5)` has to be
+        # teachable as `Quadruple(x)`.
+        self.params = [a.value.name for a in self.head.args if isinstance(a.value, Var)]
 
     @property
     def concept(self) -> str:

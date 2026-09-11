@@ -15,7 +15,7 @@ from typing import List, Optional
 from .builtins import fresh_knowledge
 from .discourse import Discourse, Turn
 from .ears import Ears, Heard
-from .expr import Arg, Call, Expr, Lit, Seq, call, render
+from .expr import Arg, Call, Expr, Lit, Seq, call
 from .knowledge import Evidence, Knowledge
 from .mouth import Mouth
 from .parse import ParseError
@@ -45,6 +45,7 @@ _SPEECH_ACTS = frozenset(
         "Forget",
         "Greeting",
         "Farewell",
+        "Laugh",
         "Thanks",
         "Affirm",
         "Deny",
@@ -112,7 +113,11 @@ class Session:
         expr = self._pre_resolve(expr)
 
         if isinstance(expr, Call) and expr.concept in _PURE_SPEECH:
-            reply = Reply(self.mouth.say(expr), heard)
+            # Say why we are stuck. Being unable to reach a model and being
+            # able to read a sentence that meant nothing are different
+            # problems, and only one of them is the speaker's to fix.
+            said = heard.reason if heard.reason else self.mouth.say(expr)
+            reply = Reply(said, heard)
             self._record(utterance, heard, None, reply.said)
             return reply
 
@@ -133,6 +138,10 @@ class Session:
 
         self.discourse.note_answer(result.value)
         said = self.mouth.say(result.value)
+        if result.learned:
+            # Say when an answer cost us a new idea. Quietly getting cleverer
+            # is the interesting part and it should not be invisible.
+            said += " (worked out %s for myself)" % "; ".join(result.learned)
         self._record(utterance, heard, result.value, said)
         return Reply(said, heard, result)
 

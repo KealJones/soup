@@ -12,7 +12,7 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 from .discourse import Discourse
-from .expr import Arg, Call, Expr, Lit, Seq, Var, render
+from .expr import Arg, Call, Expr, Lit, Seq, Var, is_name, quality_items, render
 from .knowledge import Knowledge
 
 __all__ = ["Mouth"]
@@ -103,6 +103,9 @@ class Mouth:
 
     def _say_farewell(self, expr: Call) -> str:
         return self._pick("later", "see ya", "bye", "catch you later")
+
+    def _say_laugh(self, expr: Call) -> str:
+        return self._pick("heh", "ha", "right?", "lol", "glad someone's enjoying this")
 
     def _say_thanks(self, expr: Call) -> str:
         return self._pick("anytime", "no problem", "sure thing", "you got it")
@@ -316,11 +319,28 @@ class Mouth:
             inner = expr.first("value", "of")
             return str(inner.value) if isinstance(inner, Lit) else "that"
 
+        if is_name(expr):
+            # "the lazy dog", not "dog of quality the lazy".
+            adjectives = " ".join(self._adjective(q) for q in quality_items(expr))
+            # Something with an adjective in front of it is a common noun,
+            # whether or not we happened to see it introduced with an
+            # article. "military Time" is nobody's name.
+            noun = self._noun(expr.concept).lower()
+            if noun.startswith("the "):
+                return "the %s %s" % (adjectives, noun[4:])
+            return "%s %s" % (adjectives, noun)
+
         inner = ", ".join(
             ("%s %s" % (a.name, self.describe(a.value))) if a.name else self.describe(a.value)
             for a in expr.args
         )
         return "%s of %s" % (words_for(expr.concept), inner)
+
+    def _adjective(self, expr: Expr) -> str:
+        """An adjective as it sits in front of a noun, with no article."""
+        if isinstance(expr, Call) and not expr.args:
+            return _name_words(expr.concept).lower()
+        return self.describe(expr)
 
     def _noun(self, concept: str) -> str:
         """Common nouns keep the article they were introduced with."""

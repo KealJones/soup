@@ -1,7 +1,14 @@
 # soup
 
 A small conversational system that thinks in concepts instead of tokens. No
-model, no API key, no network, no dependencies. Just Python.
+API key, no dependencies, just Python and a local model doing the listening.
+
+A model reads the sentence, and that is all it does. Everything after that is
+Soup's: what the concepts mean, how they resolve, what gets learned when one
+of them is missing, and what gets kept. When Soup meets an idea it does not
+have, it works out a definition, files it as an ordinary rule you can read and
+contradict, and answers the question it was actually asked. The next hundred
+sentences built on that idea then need nobody's help at all.
 
 ```
 you  > Alice is 30 years old
@@ -20,7 +27,10 @@ soup > it's 2
 
 ## Running it
 
-Needs Python 3.9 or newer. Nothing else.
+Needs Python 3.9 or newer, and a local model to do the listening. Ollama with
+`qwen3.5:4b` is the default and nothing has to be configured for it. No pip
+install, no API key: the whole thing is stdlib, and talking to the model is
+`urllib` against localhost.
 
 ```sh
 ./chat                          # talk to it
@@ -107,8 +117,8 @@ That is a much better question than "what does this whole sentence mean".
 | `knowledge.py` | concepts, relations, remembered facts, taught rules, persistence |
 | `realize.py` | resolves an expression as far as it can and records what it could not |
 | `builtins.py` | the starting vocabulary and the realizations that bottom out in code |
-| `ears.py` | English to concepts: a construction grammar with typed, backtracking slots, then word order |
-| `seat.py` | optional local model, tried only for the sentences constructions miss |
+| `ears.py` | English to concepts. a hundred lines, because a model does the reading |
+| `seat.py` | the model's seat, and the only three things it may be asked |
 | `mouth.py` | concepts to casual English |
 | `teacher.py` | turns a gap into a question, and an answer into a realization |
 | `discourse.py` | what "it" and "that" currently point at |
@@ -153,52 +163,73 @@ carry a taxonomy.
 relations behave is asserted knowledge, editable at runtime and saved with the
 rest of memory.
 
-### Nothing is unintelligible
-
-The ears always return structure. If no construction matches, word order is
-still there to be read, so a noun phrase, a verb and its prepositions come
-back as a concept expression whatever the words happen to be:
-
-```
-the cat sat on the mat   ->  Remember(proposition=Sat(subject=Cat(), on=Mat()))
-she gave him a book      ->  Remember(proposition=Gave(subject=Her(), recipient=Him(), object=Book()))
-asdkjh qwe zzz           ->  Remember(proposition=Qwe(subject=Asdkjh(), object=Zzz()))
-```
-
-Prepositions make the argument names, which keeps the shape of the original
-sentence. A verb nobody has ever heard of is not a failure, it is a concept
-with a signature, and that is precisely what the Teacher asks about.
-
 ### The seat
 
-Constructions are fast, free and never confidently wrong, but they only cover
-sentences somebody wrote a pattern for. A *seat* is somewhere a model can sit
-and do the one job it is plainly better at: reading a sentence nobody
-anticipated.
+`ears.py` used to be two thousand lines of construction grammar, and deleting
+it was the single best change in this repo. What it really did was recognise
+the phrasings somebody had thought of in advance. `(hi|hello|hey|yo|sup)` is
+not understanding that a greeting has occurred; it is a list, and the list
+does not contain `heya`. Every sentence it got wrong was fixed by extending a
+list, which is not learning either, so it looked clever on its own examples
+and fell over on the next thing anybody said.
 
-```
-./chat --llm
+Reading a sentence is the one part of this design that is solved better
+elsewhere. So a model does it, from a seat with exactly three methods on it:
+
+| | |
+|---|---|
+| `hear()` | what did this sentence mean? shape only, never an answer |
+| `define()` | what does this concept mean, in terms of ones we have? |
+| `answer()` | what is this worth, if nothing else could tell us? |
+
+```sh
+./chat
 ./chat --llm qwen3.5:4b
-SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat --llm
+SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat
+./chat --deaf     # no model. soup will not understand a word, and says so
 ```
 
-It is held to the same contract as the rest of the ears: return a concept
-expression, nothing else. It does not decide how anything gets done.
+Nothing else in Soup talks to a model, and nothing that comes back is trusted
+for having come from one. Concepts invented out of thin air are rejected,
+restatements of the question are rejected, and a definition built from things
+Soup does not have is thrown out by the Teacher. The prompt carries the real
+concept vocabulary grouped by kind, which is what stops a model inventing
+`Times` and `HowOld` alongside the `Multiply` and `Age` already present.
 
-Which reading wins is settled by measurement, not taste. `scripts/compare_ears.py`
-runs both over the same sentences and prints only the disagreements:
+### Working it out instead of asking
 
-- Where a construction recognised **actual words**, it wins. It is instant,
-  free, and the model does not improve on it. `is the sky blue` really is
-  better as `Ask(proposition=...)` than the model's `Question(about=...)`.
-- Where nothing matched, or where the winner was a **catch-all that
-  recognised no words at all** and merely imposed a shape, the model wins,
-  and not narrowly. The constructions turn `spooky means creepy and dark`
-  into `Dark(quality=[Spooky(), Means(), Creepy(), And()])`; the model gets
-  `Teach(concept=Spooky(), meaning=AllOf(Creepy(), Dark()))`.
+The three seat methods are listed in order of what they are worth, and the
+middle one is the interesting one. An answer helps once. A definition is kept.
 
-So the catch-alls are no longer the last line of defence, and the answer to
-a badly parsed sentence is no longer a new hand-written pattern.
+So when a concept will not resolve, Soup asks what it *means* before it asks
+what it is worth:
+
+```
+you  > what is 10 quintupled
+soup > 50 (worked out Quintuple(x) := Multiply(x, 5) for myself)
+you  > what is the quintuple of 3
+soup > it's 15
+```
+
+The second answer cost nothing. `Quintuple` is a rule now, sitting in memory
+next to `Double` and `Half`, and it survives restarts. Ask a 4B model to
+quintuple ten and it guesses a number, often the wrong one. Ask it what
+quintupling *is* and it is right, permanently.
+
+Same story for vocabulary. "military time" is not a word list in `builtins.py`,
+because the fifth spelling of it would break that. There is one concept,
+`TwentyFourHourTime`, and mapping any phrase onto it is the ears' job:
+
+```
+you  > what time is it in military time
+soup > 07:20
+```
+
+A definition Soup works out for itself goes through the same Teacher a human
+answer would: rejected unless grounded in concepts already present,
+parameterised the same way, filed as the same kind of ordinary rule. Only the
+source differs. Asking you is still there, as the last resort it should always
+have been.
 
 The prompt is given the concept vocabulary grouped by kind, which is what
 stops a model inventing `Times` and `HowOld` next to the `Multiply` and
@@ -330,15 +361,22 @@ restarts. `:rules` shows them.
 
 ## Limits, honestly
 
-The grammar is a construction grammar, not a parser with a linguistics
-department behind it. Constructions cover arithmetic, collections, attributes
-of people and things, comparatives, wh-questions, yes/no questions with
-subject-aux inversion, imperatives, modals, pronouns across turns, and
-definitions. Past that it falls back to word order, which reads a plain
-transitive sentence well and gets steadily vaguer as the grammar gets harder:
-relative clauses, tense and coordination inside an argument all come back
-flatter than they went in. Turning the seat on is the answer to that, and the
-honest reason it exists.
+Understanding is only as good as the model in the seat, and a 4B model is a
+4B model. It is reliable at shape and much shakier at argument naming, so it
+will hand back `BiggerThan(subject=, object=)` where the rule it needs to
+match wants `left=` and `right=`, and the comparison then quietly fails to
+fire. Bigger models do this less. This is a real cost of the design and not
+one to wave away: the grammar it replaced was worse at almost everything, but
+it was worse in ways that never changed between runs.
+
+No model at all means no ears. Soup says "i have no model to hear you with"
+rather than guessing, which is the honest answer but still a hard dependency
+where there used to be none.
+
+Self-teaching is bounded to two definitions per utterance and only fires on
+concepts Soup does not already have, so it will not rescue a sentence that
+was misread rather than unknown. A definition that turns out wrong is a rule
+like any other: visible in `:rules`, and you can overwrite it by saying so.
 
 Nothing is reported as misheard any more, which cuts both ways: Soup will now
 hand you a structure for a sentence it understood only loosely. Confidence on

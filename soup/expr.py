@@ -243,6 +243,37 @@ def _flat_arg(a: Arg) -> str:
 # ---------------------------------------------------------------------------
 
 
+def is_name(expr: Expr) -> bool:
+    """Is this the name of a thing, rather than something being worked out?
+
+    A bare `Dog()` is obviously a name. So is `Dog(quality=Lazy())`: putting
+    an adjective in front of a noun does not turn it into a computation, and
+    treating it as one is how "the lazy dog" came to be reported as a word
+    soup needed taught.
+
+    The distinction matters in two places that must agree. Realization uses
+    it to decide that a name needs no further resolving, and `Question` uses
+    it to decide that nothing was worked out and the thing is being asked
+    about rather than evaluated.
+    """
+    if not isinstance(expr, Call):
+        return False
+    return all(arg.name == "quality" for arg in expr.args)
+
+
+def quality_items(expr: Call) -> List[Expr]:
+    """The adjectives on a noun phrase, flattened."""
+    found: List[Expr] = []
+    for arg in expr.args:
+        if arg.name != "quality":
+            continue
+        if isinstance(arg.value, Seq):
+            found.extend(arg.value.items)
+        else:
+            found.append(arg.value)
+    return found
+
+
 def walk(expr: Expr) -> Iterator[Expr]:
     """Depth-first walk, parents before children."""
     yield expr

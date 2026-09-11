@@ -221,8 +221,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         nargs="?",
         const="",
         metavar="MODEL",
-        help="hand sentences the constructions miss to a local model "
-        "(OpenAI-compatible endpoint, $SOUP_LLM_URL, default ollama)",
+        help="which local model does the listening "
+        "(default ollama, or set $SOUP_LLM_URL / $SOUP_LLM_MODEL)",
+    )
+    parser.add_argument(
+        "--deaf",
+        action="store_true",
+        help="run with no model at all. soup will not understand a word, "
+        "which is occasionally useful for poking at its insides",
     )
     parser.add_argument(
         "--wikidata",
@@ -231,11 +237,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    seat = seat_from_env()
-    if args.llm is not None:
-        seat = seat or Seat()
-        if args.llm:
-            seat.model = args.llm
+    # Listening is the model's job, so there is one unless you say otherwise.
+    seat = None if args.deaf else (seat_from_env() or Seat())
+    if seat is not None and args.llm:
+        seat.model = args.llm
 
     session = Session(memory_path=None if args.no_memory else args.memory, llm=seat)
     if args.wikidata:

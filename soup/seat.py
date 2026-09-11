@@ -1,14 +1,25 @@
-"""An optional LLM seat for the ears.
+"""The seat a model sits in, and the three things it is allowed to be asked.
 
-Soup's constructions are fast, free and never confidently wrong, but they
-only cover the sentences somebody thought to write a pattern for. A seat is
-somewhere a model can sit and do the one job it is unambiguously better at:
-reading a sentence nobody anticipated and saying what shape it is.
+Reading English is the one part of this design that is genuinely solved better
+elsewhere, so a model does it. The seat is where it sits, and the point of
+having a named place for it is that the place is small. Everything the model
+may be asked is here, in three methods, and nothing else in Soup talks to it.
 
-The seat is held to the same contract as the rest of the ears. It returns a
-concept expression and nothing else. It does not get to decide how anything
-is accomplished, it does not answer the question, and a concept it invents is
-not a failure: an unknown concept is exactly what the Teacher exists for.
+  hear()    what did this sentence mean? shape only, never an answer.
+  define()  what does this concept mean, in terms of ones we have?
+  answer()  what is the value of this, if nothing else could tell us?
+
+They are in order of how much they are worth. `define` is the valuable one: a
+definition is bought once and kept as an ordinary rule, so it makes Soup
+permanently better, while an answer helps exactly once and is often the thing
+a small model gets wrong. Asked to quintuple ten, qwen guesses a number.
+Asked what quintupling is, it says Multiply(x, 5).
+
+Whatever comes back is checked rather than believed. Concepts invented out of
+thin air are rejected, restatements of the question are rejected, and a
+definition made of things Soup does not have is rejected by the Teacher. An
+unknown concept that survives is not a failure: it is exactly what the Teacher
+and the lookup exist for.
 
 Talks to Ollama's native /api/chat or any OpenAI-compatible
 /v1/chat/completions endpoint over stdlib urllib, so Ollama and LM Studio
@@ -52,12 +63,18 @@ MOOD: wrap the whole thing in exactly one of these.
   Question(about=...)      they asked something
   Request(action=...)      they told you to do something
   Remember(proposition=...) they stated something
-  Greeting() Farewell() Thanks() Affirm() Deny()
+  Greeting() Farewell() Thanks() Affirm() Deny() Laugh()
 
 RULES
 1. Say what the sentence MEANS, never how to accomplish it. "delete the
    biggest file" is Delete(target=Maximum(collection=Files(), by=FileSize())),
    never a loop or a sequence of steps.
+1b. Do not work anything out, and above all do not do arithmetic. If a word
+   names an idea then that idea is the concept, even when you happen to know
+   what it unpacks to. "sextupled" is Sextuple(x). It is not Multiply(x, 6)
+   and it is certainly not Power(x, 6). Unpacking concepts is somebody
+   else's job here and you will be asked about it separately; guessing at it
+   now only replaces a word we could have looked up with a number we cannot.
 2. If you do not know a concept name, invent a clear one. Inventing
    MostAdorable() is correct and useful. Do not substitute something you do
    know but that means something else.
@@ -102,6 +119,9 @@ Teach(concept=Spooky(), meaning=AllOf(Creepy(), Dark()))
 
 double it
 Request(action=Double(Ref("it")))
+
+lmaooo
+Laugh()
 
 she gave him a book yesterday
 Remember(proposition=Give(subject=She(), object=Book(), to=He(), time=Yesterday()))
@@ -178,8 +198,54 @@ EXAMPLES
   reply 37000000'''
 
 
+_DEFINING = '''You are given a concept Soup does not know, and the concepts it
+does know. Say what the unknown one MEANS, in terms of the known ones.
+
+Reply with exactly one concept expression and nothing else: no prose, no code
+fences, no explanation.
+
+This is a definition, not an answer. You are not being asked what the value is,
+you are being asked what the concept is the same as, so that Soup can work the
+value out for itself from now on.
+
+RULES
+1. Use ONLY concepts from the known list. A definition made of things Soup
+   also does not know teaches it nothing and will be thrown away.
+2. Keep the parameter names from the signature you were given, and pass them
+   on. A parameter is passed by writing its bare name:
+     Quadruple(x)  means  Multiply(x, 4)        <- passes x. correct.
+     Quadruple(x)  means  Multiply(x=4)         <- names an argument x. wrong.
+   Every parameter in the signature must appear in the definition.
+3. Define the concept, not this one case. Given Nephew(subject) do not reply
+   with somebody's actual nephew.
+4. If nothing in the known list comes close, reply exactly: Unknown()
+   That is a perfectly good answer and much better than a wrong one.
+
+EXAMPLES
+  unknown  Quadruple(x)
+  means    Multiply(x, 4)
+
+  unknown  MilitaryTime()
+  means    TwentyFourHourTime()
+
+  unknown  Grandparent(subject)
+  means    Parent(subject=Parent(subject=subject))
+
+  unknown  Cheapest(collection)
+  means    Minimum(collection=collection, by=Price())
+
+  unknown  ShorterThan(left, right)
+  means    LessThan(left=Height(subject=left), right=Height(subject=right))
+
+  unknown  Spooky()
+  means    AllOf(Creepy(), Dark())
+
+  unknown  Quixotic(subject)
+  means    Unknown()'''
+
+
 class Seat:
-    """A model sitting in the ears, used only for what constructions miss."""
+    """A model sitting in the ears, on a short leash."""
 
     def __init__(
         self,
@@ -292,11 +358,46 @@ class Seat:
         if render(answer, False) == expression:
             self.last_error = "echoed the question"
             return None
-        if _same_shape(answer, expression):
-            # Relabelling the question is not answering it.
+        if _same_shape(answer, expression) or _says_nothing_new(answer, expression):
+            # Relabelling the question is not answering it, and neither is
+            # wrapping a word from it in a concept: asked what military time
+            # is, qwen replies Concept(name="Military").
             self.last_error = "restated the question"
             return None
         return answer
+
+    def define(self, signature: str, vocabulary: List[str]) -> Optional[Expr]:
+        """Ask for a concept's meaning, not its value.
+
+        The third thing a seat can be asked, and the most useful one. `hear`
+        buys a single sentence and `answer` buys a single fact, but a
+        definition is bought once and kept: it goes through the Teacher like
+        any human answer, becomes an ordinary rule, and every later sentence
+        using the concept is then resolved by Soup itself, offline and for
+        free. Being told what "military time" means is worth more than being
+        told what time it is.
+        """
+        if not self.available:
+            return None
+        prompt = _DEFINING
+        if self.brief:
+            prompt += "\n\n" + self.brief
+        elif vocabulary:
+            prompt += "\n\nKNOWN CONCEPTS:\n" + ", ".join(sorted(vocabulary)[:220])
+        reply = self._ask(prompt, "unknown  %s\nmeans" % signature)
+        if reply is None:
+            return None
+        try:
+            meaning = parse(_clean(reply))
+        except (ParseError, ValueError, IndexError):
+            self.last_error = "unparseable definition: %s" % reply[:120]
+            return None
+        if isinstance(meaning, Call) and meaning.concept in ("Unknown", "Nothing"):
+            return None
+        if render(meaning, False) == signature:
+            self.last_error = "defined the concept as itself"
+            return None
+        return meaning
 
     def _ask(self, system: str, utterance: str) -> Optional[str]:
         body = json.dumps(self._payload(system, utterance)).encode("utf-8")
@@ -395,10 +496,31 @@ def _unfaithful(expr: Expr, utterance: str, vocabulary: List[str]) -> List[str]:
         if name in known or name in invented:
             continue
         words = _camel_words(name)
-        if all(w in said or w in _FUNCTION_WORDS for w in words):
+        if all(w in _FUNCTION_WORDS or _echoes(w, said) for w in words):
             continue
         invented.append(name)
     return invented
+
+
+def _echoes(word: str, said: set) -> bool:
+    """Was this word really spoken, allowing for the fact that words inflect?
+
+    "sextupled" is a perfectly ordinary way to say Sextuple, and "cities" is
+    City. Demanding the letters match exactly would have the guard rejecting
+    the very paraphrasing it exists to permit, so a shared stem counts. The
+    length floor is what keeps that from becoming a loophole: short words
+    would otherwise collide their way through on a prefix or two.
+    """
+    if word in said:
+        return True
+    if len(word) < 4:
+        return False
+    stem = word[:-1]
+    return any(
+        spoken.startswith(stem) or word.startswith(spoken[:-1])
+        for spoken in said
+        if len(spoken) >= 4
+    )
 
 
 def vocabulary_brief(knowledge, per_kind: int = 70) -> str:
@@ -459,6 +581,23 @@ def _refusal(line: str) -> bool:
         phrase in low
         for phrase in ("i'm sorry", "i am sorry", "i cannot", "i can't", "as an ai")
     )
+
+
+def _says_nothing_new(answer: Expr, question: str) -> bool:
+    """An answer built entirely out of words that were in the question.
+
+    Not applied to plain literals, because "Paris" answering the capital of
+    France is a literal and telling us something. This is about a concept
+    wrapped around a word we already had.
+    """
+    if not isinstance(answer, Call) or not answer.args:
+        return False
+    asked = set(re.findall(r"[a-z0-9]+", question.lower()))
+    pieces = re.findall(r"[a-z0-9]+", render(answer, False).lower())
+    return bool(pieces) and all(p in asked or p in _STOP for p in pieces)
+
+
+_STOP = frozenset(["concept", "name", "value", "meaning", "thing", "label", "of", "is"])
 
 
 def _same_shape(answer: Expr, question: str) -> bool:
