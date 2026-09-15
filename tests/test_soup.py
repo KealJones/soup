@@ -817,14 +817,14 @@ class TestVocabularyBrief(unittest.TestCase):
         self.assertEqual([], missing)
         brief = vocabulary_brief(knowledge)
         self.assertIn("Add: combine values", brief)
-        self.assertIn("VisitWebpage: fetch a page's static text as Markdown; JavaScript is not run", brief)
+        self.assertIn("VisitWebpage: fetch a page into structured sections", brief)
 
     def test_filtered_concepts_command_shows_glosses(self):
         session = Session(knowledge=fresh_knowledge(), memory_path=None, sources=[])
         output = io.StringIO()
         with redirect_stdout(output):
             _command(session, "concepts", "VisitWebpage")
-        self.assertIn("VisitWebpage — fetch a page's static text as Markdown; JavaScript is not run", output.getvalue())
+        self.assertIn("VisitWebpage — fetch a page into structured sections", output.getvalue())
 
 
 class TestFaithfulEars(unittest.TestCase):
@@ -916,12 +916,12 @@ class TestSpeaking(unittest.TestCase):
     def test_with_nothing_in_the_chair_the_expression_goes_out_as_it_is(self):
         self.assertIn("24", reply(fresh(), "Speak(of=Answer(value=24))"))
 
-    def test_wikipedia_result_is_spoken_instead_of_reducing_to_the_query(self):
-        markdown = (
-            "## [Wikipedia: Parakeet](https://en.wikipedia.org/wiki/Parakeet)\n\n"
-            "A parakeet is any one of many small- to medium-sized species of parrot, "
-            "in multiple genera, that generally have long tail feathers.\n\n"
-            "Other matches: [Rose-ringed parakeet](https://example.test/rose)"
+    def test_wikipedia_concepts_are_spoken_instead_of_reducing_to_the_query(self):
+        results = parse(
+            'SearchResults(query="parakeet", results=['
+            'SearchResult(title="Parakeet", '
+            'url="https://en.wikipedia.org/wiki/Parakeet", '
+            'snippet="A parakeet is a small parrot.")])'
         )
         script = Script(
             {
@@ -938,14 +938,10 @@ class TestSpeaking(unittest.TestCase):
 
         script.speak = broken_mouth
         session = fresh(llm=script)
-        with patch("soup.web.wikipedia_search", return_value=markdown):
+        with patch("soup.web.wikipedia_search", return_value=results):
             said = reply(session, "can you lookup what a parakeet is?")
 
-        self.assertEqual(
-            said,
-            "A parakeet is any one of many small- to medium-sized species of parrot, "
-            "in multiple genera, that generally have long tail feathers.",
-        )
+        self.assertEqual(said, "A parakeet is a small parrot.")
         self.assertEqual([], script.spoken)
 
 

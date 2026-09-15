@@ -8,7 +8,6 @@ to more concepts. That is the whole point.
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -1216,12 +1215,12 @@ def _web_search(ctx: Context, c: Call) -> Optional[Expr]:
     try:
         from .web import web_search
 
-        markdown = web_search(query, int(count) if count is not None else 5)
+        results = web_search(query, int(count) if count is not None else 5)
     except Exception as exc:
         ctx.note("web search failed: %s" % exc)
-        return Lit("Web search failed: %s" % exc)
+        return unknown(c)
     ctx.effect("searched the web for %r" % query)
-    return Lit(markdown)
+    return results
 
 
 @native("VisitWebpage", "BrowseWebpage", "ReadWebpage")
@@ -1232,12 +1231,12 @@ def _visit_webpage(ctx: Context, c: Call) -> Optional[Expr]:
     try:
         from .web import visit_webpage
 
-        markdown = visit_webpage(url)
+        page = visit_webpage(url)
     except Exception as exc:
         ctx.note("web page visit failed: %s" % exc)
-        return Lit("Could not read webpage: %s" % exc)
+        return unknown(c)
     ctx.effect("read webpage %s" % url)
-    return Lit(markdown)
+    return page
 
 
 @native("WikipediaSearch", "SearchWikipedia")
@@ -1249,12 +1248,12 @@ def _wikipedia_search(ctx: Context, c: Call) -> Optional[Expr]:
     try:
         from .web import wikipedia_search
 
-        markdown = wikipedia_search(query, int(count) if count is not None else 5)
+        results = wikipedia_search(query, int(count) if count is not None else 5)
     except Exception as exc:
         ctx.note("Wikipedia search failed: %s" % exc)
-        return Lit("Wikipedia search failed: %s" % exc)
+        return unknown(c)
     ctx.effect("searched Wikipedia for %r" % query)
-    return Lit(markdown)
+    return results
 
 
 @native("TranscribeAudio", "SpeechToText", "Transcribe")
@@ -1358,7 +1357,7 @@ def _say(ctx: Context, target: Expr, style: str = "") -> str:
     return _keep_the_letter(said, target) if said else expression
 
 
-_MARKDOWN_LOOKUPS = frozenset(
+_STRUCTURED_LOOKUPS = frozenset(
     {
         "WikipediaSearch",
         "SearchWikipedia",
@@ -1373,12 +1372,11 @@ _MARKDOWN_LOOKUPS = frozenset(
 
 
 def _spoken_lookup_answer(target: Expr) -> Optional[str]:
-    """Speak fetched prose directly instead of asking a small model to restate it.
+    """Speak the useful text from a structured lookup result.
 
-    Search tools already return human-readable Markdown inside Answer(value=).
-    Handing a long quoted result to the mouth model can collapse it to the
-    query itself (for example, saying only "parakeet"). Use the first useful
-    paragraph from the source, stripping Markdown while preserving its words.
+    Search and page tools return concepts now, not Markdown. These small
+    renderers let the mouth say the fetched words without asking a model to
+    rediscover them from a large serialized expression.
     """
     if not isinstance(target, Call) or target.concept != "Answer":
         return None
@@ -1386,41 +1384,54 @@ def _spoken_lookup_answer(target: Expr) -> Optional[str]:
     value = target.get("value")
     if (
         not isinstance(source, Call)
-        or source.concept not in _MARKDOWN_LOOKUPS
-        or not isinstance(value, Lit)
-        or not isinstance(value.value, str)
+        or source.concept not in _STRUCTURED_LOOKUPS
+        or not isinstance(value, Call)
     ):
         return None
-
-    for block in re.split(r"\n\s*\n", value.value):
-        block = block.strip()
-        if not block or re.match(r"^#{1,6}\s", block):
-            continue
-        if block.lower().startswith("other matches:"):
-            continue
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        lines = [_spoken_markdown(line) for line in lines]
-        lines = [line for line in lines if line]
-        if not lines:
-            continue
-        if source.concept in ("WebSearch", "SearchWeb", "DuckDuckGoSearch") and len(
-            lines
-        ) > 1:
-            title = lines[0]
-            if title[-1] not in ".?!":
-                title += "."
-            return title + " " + " ".join(lines[1:])
-        return " ".join(lines)
+    if value.concept == "SearchResults":
+        return _speak_search_results(value, source.concept)
+    if value.concept == "WebPage":
+        return _speak_web_page(value)
     return None
 
 
-def _spoken_markdown(text: str) -> str:
-    """Turn one Markdown line into words suitable for a spoken reply."""
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"[*_`~]", "", text)
-    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+def _speak_search_results(results: Call, source: str) -> Optional[str]:
+    items = results.get("results")
+    if not isinstance(items, Seq) or not items.items:
+        query = results.get("query")
+        text = query.value if isinstance(query, Lit) else "that"
+        return "I couldn't find any results for %s." % text
+    first = items.items[0]
+    if not isinstance(first, Call) or first.concept != "SearchResult":
+        return None
+    title = _literal_text(first.get("title"))
+    snippet = _literal_text(first.get("snippet"))
+    if source in ("WikipediaSearch", "SearchWikipedia"):
+        return snippet or title
+    if title and snippet:
+        return "%s. %s" % (title.rstrip("."), snippet)
+    return snippet or title
+
+
+def _speak_web_page(page: Call) -> Optional[str]:
+    sections = page.get("sections")
+    if isinstance(sections, Seq):
+        for section in sections.items:
+            if not isinstance(section, Call) or section.concept != "WebSection":
+                continue
+            paragraphs = section.get("paragraphs")
+            if isinstance(paragraphs, Seq):
+                for paragraph in paragraphs.items:
+                    text = _literal_text(paragraph)
+                    if text:
+                        return text
+    return _literal_text(page.get("title"))
+
+
+def _literal_text(expr: Optional[Expr]) -> Optional[str]:
+    if isinstance(expr, Lit) and isinstance(expr.value, str):
+        return expr.value.strip() or None
+    return None
 
 
 def _keep_the_letter(said: str, expr: Expr) -> str:
@@ -2795,7 +2806,17 @@ _KINDS = {
         ("Seat", "the model in the chair"),
         ("Agent", "someone else to consult"),
     ],
-    "value": [("Number", ""), ("Text", ""), ("Truth", ""), ("List", "")],
+    "value": [
+        ("Number", ""),
+        ("Text", ""),
+        ("Truth", ""),
+        ("List", ""),
+        "SearchResults",
+        "SearchResult",
+        "WebPage",
+        "WebSection",
+        "WebLink",
+    ],
     "operation": [
         "Add",
         "Plus",
@@ -2845,9 +2866,9 @@ _KINDS = {
         "Write",
         "Files",
         "Delete",
-        ("WebSearch", "search the web and return results with links as Markdown"),
-        ("VisitWebpage", "fetch a page's static text as Markdown; JavaScript is not run"),
-        ("WikipediaSearch", "find a Wikipedia article and return its introduction and link"),
+        ("WebSearch", "search the web and return structured results"),
+        ("VisitWebpage", "fetch a page into structured sections and links; JavaScript is not run"),
+        ("WikipediaSearch", "find Wikipedia articles with introductions and links"),
         ("TranscribeAudio", "turn an audio file or URL into text with a local speech model"),
         "Fetch",
         "Url",
@@ -3075,14 +3096,19 @@ _BUILTIN_GLOSSES = {
     "Json": "parse JSON text into structured values",
     "Url": "build a URL from its scheme, host, path, and query fields",
     "Fetch": "request a URL and return its response text",
-    "WebSearch": "search the web and return linked results as Markdown",
-    "SearchWeb": "search the web and return linked results as Markdown",
-    "DuckDuckGoSearch": "search the web and return linked results as Markdown",
-    "VisitWebpage": "fetch a page's static text as Markdown; JavaScript is not run",
-    "BrowseWebpage": "fetch a page's static text as Markdown; JavaScript is not run",
-    "ReadWebpage": "fetch a page's static text as Markdown; JavaScript is not run",
-    "WikipediaSearch": "find a Wikipedia article and return its introduction",
-    "SearchWikipedia": "find a Wikipedia article and return its introduction",
+    "WebSearch": "search the web and return structured results",
+    "SearchWeb": "search the web and return structured results",
+    "DuckDuckGoSearch": "search the web and return structured results",
+    "VisitWebpage": "fetch a page into structured sections and links; JavaScript is not run",
+    "BrowseWebpage": "fetch a page into structured sections and links; JavaScript is not run",
+    "ReadWebpage": "fetch a page into structured sections and links; JavaScript is not run",
+    "WikipediaSearch": "find Wikipedia articles with introductions and links",
+    "SearchWikipedia": "find Wikipedia articles with introductions and links",
+    "SearchResults": "a query and its list of search results",
+    "SearchResult": "a result with a title, URL, and summary text",
+    "WebPage": "a fetched page with structured content and links",
+    "WebSection": "a page heading and its paragraphs",
+    "WebLink": "a page link with its text and URL",
     "TranscribeAudio": "turn an audio file or URL into text with a local speech model",
     "SpeechToText": "turn audio into written words with a local speech model",
     "Transcribe": "turn audio into written words with a local speech model",

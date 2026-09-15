@@ -361,8 +361,10 @@ the other returned records remain available in `:facts` and saved memory.
 
 ### Search and read the web
 
-Soup also has explicit, keyless web actions. They return Markdown so the
-model or a person can read the results:
+Soup also has explicit, keyless web actions. Their results stay in Soup's
+concept language: `SearchResults` contains `SearchResult` values, and
+`WebPage` contains sections and links. The mouth speaks source text when
+answering, while the full structured result remains available to Soup:
 
 ```
 search the web for concept-based AI assistants

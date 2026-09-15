@@ -202,9 +202,9 @@ World natives (same family as the clock, not a coding agent):
 | `Time` `Date` `Day` | the clock |
 | `Read` `Write` `Files` `Delete` | the filesystem |
 | `Fetch` | HTTP |
-| `WebSearch` | keyless DuckDuckGo search, returned as Markdown |
-| `VisitWebpage` | fetch a page and return readable Markdown |
-| `WikipediaSearch` | find an article and return its introduction and link |
+| `WebSearch` | keyless DuckDuckGo search as `SearchResults` and `SearchResult` values |
+| `VisitWebpage` | fetch a page into `WebPage`, `WebSection`, and `WebLink` values |
+| `WikipediaSearch` | return article candidates as `SearchResults`, with the top introduction |
 | `TranscribeAudio` | local Whisper transcription of a file or audio URL |
 | `Url` | structured URL, not string-gluing |
 | `Json` `GetProperty` | parsing and picking fields |

@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from soup.builtins import fresh_knowledge
+from soup.expr import Call, Lit, Seq
 from soup.parse import parse
 from soup.realize import Realizer
 
@@ -38,7 +39,7 @@ class TestWebConcepts(unittest.TestCase):
     def realize(self, source: str):
         return Realizer(fresh_knowledge()).realize(parse(source)).value
 
-    def test_web_search_returns_markdown_from_keyless_search_results(self):
+    def test_web_search_returns_concept_records_from_keyless_results(self):
         class FakeDDGS:
             def text(self, query, max_results):
                 self.query = query
@@ -57,10 +58,18 @@ class TestWebConcepts(unittest.TestCase):
 
         self.assertEqual(fake.query, "concept soup")
         self.assertEqual(fake.max_results, 3)
-        self.assertIn("[Soup docs](https://example.test/soup)", out.value)
-        self.assertIn("A concept soup.", out.value)
+        self.assertEqual(out.concept, "SearchResults")
+        self.assertEqual(out.get("query"), Lit("concept soup"))
+        results = out.get("results")
+        self.assertIsInstance(results, Seq)
+        self.assertEqual(len(results.items), 1)
+        result = results.items[0]
+        self.assertEqual(result.concept, "SearchResult")
+        self.assertEqual(result.get("title"), Lit("Soup docs"))
+        self.assertEqual(result.get("url"), Lit("https://example.test/soup"))
+        self.assertEqual(result.get("snippet"), Lit("A concept soup."))
 
-    def test_visit_webpage_converts_html_to_markdown_and_skips_script(self):
+    def test_visit_webpage_returns_sections_and_links_and_skips_script(self):
         response = _Response(
             b"<html><body><h1>Hello</h1><p>Read <a href='https://example.test'>the page</a>.</p>"
             b"<script>do not include this</script><ul><li>one</li><li>two</li></ul></body></html>"
@@ -68,16 +77,38 @@ class TestWebConcepts(unittest.TestCase):
         with patch("soup.web.urllib.request.urlopen", return_value=response):
             out = self.realize('VisitWebpage(url="https://example.test")')
 
-        self.assertIn("# Hello", out.value)
-        self.assertIn("[the page](https://example.test)", out.value)
-        self.assertIn("- one", out.value)
-        self.assertNotIn("do not include this", out.value)
+        self.assertEqual(out.concept, "WebPage")
+        self.assertEqual(out.get("title"), Lit("Hello"))
+        sections = out.get("sections")
+        self.assertIsInstance(sections, Seq)
+        self.assertEqual(sections.items[0].concept, "WebSection")
+        paragraphs = sections.items[0].get("paragraphs")
+        self.assertEqual(paragraphs.items[0], Lit("Read the page."))
+        self.assertEqual(paragraphs.items[1], Lit("one"))
+        self.assertEqual(paragraphs.items[2], Lit("two"))
+        links = out.get("links")
+        self.assertIsInstance(links, Seq)
+        self.assertEqual(links.items[0].concept, "WebLink")
+        self.assertEqual(links.items[0].get("text"), Lit("the page"))
+        self.assertEqual(links.items[0].get("url"), Lit("https://example.test"))
+        self.assertNotIn("do not include this", repr(out))
 
-    def test_wikipedia_search_returns_an_article_summary_and_markdown_link(self):
+    def test_wikipedia_search_returns_all_candidates_as_concepts(self):
         responses = [
             _Response(
                 json.dumps(
-                    {"query": {"search": [{"pageid": 42, "title": "Soup (software)"}]}}
+                    {
+                        "query": {
+                            "search": [
+                                {
+                                    "pageid": 42,
+                                    "title": "Soup (software)",
+                                    "snippet": "software project",
+                                },
+                                {"pageid": 43, "title": "Soup", "snippet": "food"},
+                            ]
+                        }
+                    }
                 ).encode(),
                 "application/json; charset=utf-8",
             ),
@@ -100,9 +131,19 @@ class TestWebConcepts(unittest.TestCase):
         with patch("soup.web.urllib.request.urlopen", side_effect=responses):
             out = self.realize('WikipediaSearch(query="Soup software")')
 
-        self.assertIn("[Wikipedia: Soup (software)]", out.value)
-        self.assertIn("A fictional software project.", out.value)
-        self.assertIn("https://en.wikipedia.org/wiki/Soup_(software)", out.value)
+        self.assertEqual(out.concept, "SearchResults")
+        results = out.get("results")
+        self.assertIsInstance(results, Seq)
+        self.assertEqual(len(results.items), 2)
+        first = results.items[0]
+        self.assertIsInstance(first, Call)
+        self.assertEqual(first.get("title"), Lit("Soup (software)"))
+        self.assertEqual(first.get("snippet"), Lit("A fictional software project."))
+        self.assertEqual(
+            first.get("url"), Lit("https://en.wikipedia.org/wiki/Soup_(software)")
+        )
+        self.assertEqual(results.items[1].get("title"), Lit("Soup"))
+        self.assertEqual(results.items[1].get("snippet"), Lit("food"))
 
     def test_audio_transcription_uses_local_mlx_whisper_when_available(self):
         calls = []
