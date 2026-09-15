@@ -1931,6 +1931,11 @@ class TestLookingItUp(unittest.TestCase):
             parse("Players(subject=Chess())")
         )
         self.assertEqual(out.value, Lit(2), out.trace)
+        self.assertTrue(any("looked it up on Wikidata" in step for step in out.trace))
+        answer = next(
+            fact for fact in self.knowledge.facts if fact.proposition.concept == "Players"
+        )
+        self.assertEqual(answer.evidence.source, "wikidata")
         self.assertEqual(naming.defined, [])
 
     def test_a_property_nobody_calls_that_is_found_by_paraphrase(self):

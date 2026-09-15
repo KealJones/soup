@@ -59,6 +59,9 @@ def words_of(name: str) -> str:
 class Wikidata:
     """A place to look things up, and a habit of remembering what was found."""
 
+    tag = "wikidata"
+    note = "looked it up on Wikidata"
+
     def __init__(
         self,
         knowledge: Optional[Knowledge] = None,
