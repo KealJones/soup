@@ -8,6 +8,7 @@ to more concepts. That is the whole point.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -1342,6 +1343,9 @@ def _say(ctx: Context, target: Expr, style: str = "") -> str:
         # Already words. Saying them again only gives the chair a chance to
         # paraphrase away something that was already settled.
         return target.value
+    sourced = _spoken_lookup_answer(target) if not style else None
+    if sourced is not None:
+        return sourced
     expression = render(target, multiline=False)
     seat = ctx.realizer.seat
     speak = getattr(seat, "speak", None)
@@ -1352,6 +1356,71 @@ def _say(ctx: Context, target: Expr, style: str = "") -> str:
         return expression
     said = speak(expression, style)
     return _keep_the_letter(said, target) if said else expression
+
+
+_MARKDOWN_LOOKUPS = frozenset(
+    {
+        "WikipediaSearch",
+        "SearchWikipedia",
+        "WebSearch",
+        "SearchWeb",
+        "DuckDuckGoSearch",
+        "VisitWebpage",
+        "BrowseWebpage",
+        "ReadWebpage",
+    }
+)
+
+
+def _spoken_lookup_answer(target: Expr) -> Optional[str]:
+    """Speak fetched prose directly instead of asking a small model to restate it.
+
+    Search tools already return human-readable Markdown inside Answer(value=).
+    Handing a long quoted result to the mouth model can collapse it to the
+    query itself (for example, saying only "parakeet"). Use the first useful
+    paragraph from the source, stripping Markdown while preserving its words.
+    """
+    if not isinstance(target, Call) or target.concept != "Answer":
+        return None
+    source = target.get("to")
+    value = target.get("value")
+    if (
+        not isinstance(source, Call)
+        or source.concept not in _MARKDOWN_LOOKUPS
+        or not isinstance(value, Lit)
+        or not isinstance(value.value, str)
+    ):
+        return None
+
+    for block in re.split(r"\n\s*\n", value.value):
+        block = block.strip()
+        if not block or re.match(r"^#{1,6}\s", block):
+            continue
+        if block.lower().startswith("other matches:"):
+            continue
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        lines = [_spoken_markdown(line) for line in lines]
+        lines = [line for line in lines if line]
+        if not lines:
+            continue
+        if source.concept in ("WebSearch", "SearchWeb", "DuckDuckGoSearch") and len(
+            lines
+        ) > 1:
+            title = lines[0]
+            if title[-1] not in ".?!":
+                title += "."
+            return title + " " + " ".join(lines[1:])
+        return " ".join(lines)
+    return None
+
+
+def _spoken_markdown(text: str) -> str:
+    """Turn one Markdown line into words suitable for a spoken reply."""
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"[*_`~]", "", text)
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
 def _keep_the_letter(said: str, expr: Expr) -> str:

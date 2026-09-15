@@ -916,6 +916,38 @@ class TestSpeaking(unittest.TestCase):
     def test_with_nothing_in_the_chair_the_expression_goes_out_as_it_is(self):
         self.assertIn("24", reply(fresh(), "Speak(of=Answer(value=24))"))
 
+    def test_wikipedia_result_is_spoken_instead_of_reducing_to_the_query(self):
+        markdown = (
+            "## [Wikipedia: Parakeet](https://en.wikipedia.org/wiki/Parakeet)\n\n"
+            "A parakeet is any one of many small- to medium-sized species of parrot, "
+            "in multiple genera, that generally have long tail feathers.\n\n"
+            "Other matches: [Rose-ringed parakeet](https://example.test/rose)"
+        )
+        script = Script(
+            {
+                "can you lookup what a parakeet is": (
+                    'Question(about=WikipediaSearch(query="parakeet"))'
+                )
+            }
+        )
+        script.spoken = []
+
+        def broken_mouth(expression, style=""):
+            script.spoken.append(expression)
+            return "parakeet"
+
+        script.speak = broken_mouth
+        session = fresh(llm=script)
+        with patch("soup.web.wikipedia_search", return_value=markdown):
+            said = reply(session, "can you lookup what a parakeet is?")
+
+        self.assertEqual(
+            said,
+            "A parakeet is any one of many small- to medium-sized species of parrot, "
+            "in multiple genera, that generally have long tail feathers.",
+        )
+        self.assertEqual([], script.spoken)
+
 
 class TestTheClock(unittest.TestCase):
     """Two concepts, not a list of the words people use for them."""
