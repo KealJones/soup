@@ -28,8 +28,8 @@ soup > it's 2
 ## Running it
 
 Needs Python 3.9 or newer and a model. On this Mac that means MLX: soup
-loads `qwen3.5:4b` itself, in-process, no server. First run downloads the
-4-bit weights (~2GB) into the Hugging Face cache.
+loads `qwen3.5:4b` for hearing and `qwen3.5:9b` for define, in-process, no
+server. First run downloads the 4-bit weights into the Hugging Face cache.
 
 ```sh
 python3 -m venv .venv
@@ -39,17 +39,21 @@ python3 -m venv .venv
 
 Ollama is optional. If you already `ollama pull`'d something, `--llm` still
 accepts those names; they map onto the matching MLX repo. A path to a `.gguf`
-or `$SOUP_LLM_URL` still work if you would rather.
+or `$SOUP_LLM_URL` still work if you would rather. `$SOUP_TEACHER_MODEL`
+picks the define chair (default `qwen3.5:9b`).
 
 ```sh
 ./chat                          # talk to it
 ./chat --show                   # talk to it, printing the concept structures
 ./chat "what is 6 times 7"      # say one thing and quit
 ./chat --no-memory              # do not read or write data/memory.json
+./chat --hear                   # print what the ears heard; do not realize
 
 python3 -m unittest discover -s tests
 python3 scripts/sweep.py        # talk at it with 50-odd utterances at once
 ```
+
+Layers, terms, and which file is which: [GETTING_STARTED.md](GETTING_STARTED.md).
 
 In the chat, `:help` lists the commands. The useful ones are `:ears` (the
 concept expression your last message became), `:why` (how it got the answer),
@@ -192,8 +196,9 @@ elsewhere. So a model does it, from a seat with exactly three methods on it:
 | `answer()` | what is this worth, if nothing else could tell us? |
 
 ```sh
-./chat                              # mmap qwen3.5:4b from ~/.ollama, in-process
+./chat                              # 4b hears, 9b defines, in-process
 ./chat --llm qwen3.5:4b
+./chat --teacher qwen3.5:9b
 ./chat --llm /path/to/model.gguf
 SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat   # still works
 ./chat --deaf                       # no model. soup will not understand a word
@@ -306,9 +311,12 @@ outcomes. So sources are tried in order of how much they deserve to be
 believed, and a record beats a guess:
 
 ```
-./chat --wikidata            # no model needed
-./chat --llm --wikidata      # model reads the sentence, wikidata answers it
+./chat                       # wikidata is on
+./chat --no-wikidata         # guess, or ask, instead of looking it up
 ```
+
+`Session()` enables the same source by default for Python callers. Pass
+`sources=[]` to keep a session offline or to provide only your own sources.
 
 ```
 you  > when was albert einstein born
@@ -338,17 +346,40 @@ seconds ago is one soup can now tell you the meaning of. That is the sense in
 which it teaches itself: not by being told, but by having gone and looked.
 
 Search is a ranking rather than a lookup, so only an exact name counts, label
-before alias. The top property match for "tower" is a Tower Records artist ID
-and for "is" it is a library identifier; taking either would not be a near
-miss, it would be a fabricated fact with a citation attached. A concept soup
-can already act on is never looked up either, so this extends the vocabulary
-without ever quietly reinterpreting it.
-
-Statement rank and end dates are respected, because France has ten capitals
-on record and nine of them stopped some time ago.
+before alias. Those choices are `Filter` and `First` rules over the structured
+JSON returned by `WikidataSearch`; statement rank and end dates use the same
+concept operations. A concept soup can already act on is never looked up, so
+this extends the vocabulary without quietly reinterpreting it.
 
 With no network the lookup marks itself unavailable and everything carries on
 exactly as before.
+
+Soup keeps the complete search candidates and all statements returned for
+the requested property as `WikidataSearchResult` and `WikidataStatement`
+facts. The chosen answer is still filtered by exact label, rank, and end date;
+the other returned records remain available in `:facts` and saved memory.
+
+### Search and read the web
+
+Soup also has explicit, keyless web actions. They return Markdown so the
+model or a person can read the results:
+
+```
+search the web for concept-based AI assistants
+Request(action=WebSearch(query="concept-based AI assistants"))
+
+read https://example.org/guide
+Request(action=VisitWebpage(url="https://example.org/guide"))
+
+look up Ada Lovelace on Wikipedia
+Request(action=WikipediaSearch(query="Ada Lovelace"))
+```
+
+`TranscribeAudio(path="/path/to/recording.wav")` runs Whisper locally. On
+Apple Silicon, `mlx-whisper` is installed with the project requirements and
+downloads its model on first use. No search, page-reading, or transcription
+API key is needed. These are actions Soup takes when asked; they are separate
+from the automatic Wikidata fact source.
 
 The model is in-process. On Apple Silicon that is MLX running a 4-bit
 Qwen3.5-4B; a Hugging Face id or a `.gguf` path also work. A server is still

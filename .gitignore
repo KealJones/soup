@@ -3,4 +3,6 @@ __pycache__/
 .DS_Store
 data/memory.json
 data/*.json.tmp
+data/mmlu_pro/
+data/bench/
 .venv/

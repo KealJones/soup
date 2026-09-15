@@ -31,6 +31,7 @@ MLX_ALIASES = {
     "qwen3.5:4b": "mlx-community/Qwen3.5-4B-MLX-4bit",
     "qwen3.5:0.8b": "mlx-community/Qwen3.5-0.8B-MLX-4bit",
     "qwen3.5:2b": "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "qwen3.5:9b": "mlx-community/Qwen3.5-9B-MLX-4bit",
 }
 
 
@@ -96,14 +97,14 @@ def load(name: str = "", weights: Optional[str] = None) -> Optional[dict]:
     return None
 
 
-def chat(engine: dict, system: str, utterance: str) -> str:
+def chat(engine: dict, system: str, utterance: str, max_tokens: int = 300) -> str:
     """One completion. Thinking stays off; this is a line of syntax."""
     if engine["kind"] == "mlx":
-        return _chat_mlx(engine, system, utterance)
-    return _chat_gguf(engine["model"], system, utterance)
+        return _chat_mlx(engine, system, utterance, max_tokens)
+    return _chat_gguf(engine["model"], system, utterance, max_tokens)
 
 
-def _chat_mlx(engine: dict, system: str, utterance: str) -> str:
+def _chat_mlx(engine: dict, system: str, utterance: str, max_tokens: int = 300) -> str:
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_sampler
 
@@ -122,19 +123,19 @@ def _chat_mlx(engine: dict, system: str, utterance: str) -> str:
         engine["model"],
         tokenizer,
         prompt=prompt,
-        max_tokens=300,
+        max_tokens=max_tokens,
         sampler=make_sampler(temp=0),
         verbose=False,
     )
     return _strip_think(text)
 
 
-def _chat_gguf(llm: Any, system: str, utterance: str) -> str:
+def _chat_gguf(llm: Any, system: str, utterance: str, max_tokens: int = 300) -> str:
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": utterance},
     ]
-    kwargs = dict(messages=messages, temperature=0, max_tokens=300)
+    kwargs = dict(messages=messages, temperature=0, max_tokens=max_tokens)
     try:
         reply = llm.create_chat_completion(
             chat_template_kwargs={"enable_thinking": False},

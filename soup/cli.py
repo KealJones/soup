@@ -8,11 +8,10 @@ import sys
 from typing import List, Optional
 
 from .expr import Call, render
-from .lookup import Wikidata
 from .seat import Seat, seat_from_env
 from .session import DEFAULT_MEMORY, Reply, Session
 
-__all__ = ["main", "run_repl"]
+__all__ = ["main", "run_repl", "run_hear", "hear_once"]
 
 _COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -41,7 +40,7 @@ HELP = """
   :answer            the concept structure soup answered with
   :why               how it got there
   :know              what soup knows, in numbers
-  :concepts [word]   list concepts (optionally filtered)
+  :concepts [word]   list concepts; filtered results include glosses
   :facts [word]      list remembered facts
   :rules             list realizations soup has been taught
   :show              show ears + answer for every turn from now on
@@ -94,6 +93,12 @@ def run_repl(session: Session, show: bool = False) -> int:
 def _dump(reply: Reply) -> None:
     if reply.heard is not None:
         print(DIM("  ears  "), GREEN(render(reply.heard.expr, multiline=False)))
+        if reply.heard.guessed is not None and reply.heard.guessed != reply.heard.expr:
+            print(DIM("  heard "), GREEN(render(reply.heard.guessed, multiline=False)))
+        if reply.heard.note:
+            print(DIM("  note  "), reply.heard.note)
+        elif reply.heard.reason:
+            print(DIM("  note  "), reply.heard.reason)
     if reply.result is not None:
         print(DIM("  soup  "), YELLOW(render(reply.result.value, multiline=False)))
         for gap in reply.result.gaps:
@@ -138,7 +143,12 @@ def _command(session: Session, command: str, argument: str) -> bool:
         names = sorted(k.concepts)
         if argument:
             names = [n for n in names if argument.lower() in n.lower()]
-        _columns(names)
+        if argument:
+            for name in names:
+                gloss = k.concepts[name].gloss
+                print("  %s%s" % (name, (" — " + gloss) if gloss else ""))
+        else:
+            _columns(names)
         return True
 
     if command == "facts":
@@ -158,7 +168,7 @@ def _command(session: Session, command: str, argument: str) -> bool:
         any_shown = False
         for bucket in k.rules.values():
             for rule in bucket:
-                print("  %s %s" % (rule.source_text(), DIM("[%s]" % rule.evidence.source)))
+                print("  %s %s" % (rule.source_text(), DIM("[%s]" % (rule.method or rule.evidence.source))))
                 any_shown = True
         if not any_shown:
             print(DIM("  no realizations yet"))
@@ -176,7 +186,6 @@ def _command(session: Session, command: str, argument: str) -> bool:
         session.realizer.knowledge = session.knowledge
         session.ears.knowledge = session.knowledge
         session.teacher.knowledge = session.knowledge
-        session.mouth.knowledge = session.knowledge
         del turns[:]
         print(DIM("  wiped"))
         return True
@@ -226,6 +235,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "weights on disk are loaded in-process; a URL still talks HTTP",
     )
     parser.add_argument(
+        "--teacher",
+        metavar="MODEL",
+        help="which model does define and answer (default: qwen3.8:27b). "
+        "the ears stay on --llm so hearing stays fast",
+    )
+    parser.add_argument(
         "--deaf",
         action="store_true",
         help="run with no model at all. soup will not understand a word, "
@@ -233,8 +248,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--wikidata",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="look facts up in wikidata (default: on). --no-wikidata to skip",
+    )
+    parser.add_argument(
+        "--hear",
         action="store_true",
-        help="look facts up in wikidata, learning the concepts as it goes",
+        help="print what the ears heard and stop. no realization, no teacher",
     )
     args = parser.parse_args(argv)
 
@@ -246,10 +267,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.llm.endswith(".gguf") or os.path.isfile(args.llm):
             seat.weights = args.llm
             seat.embed = True
+    if seat is not None and args.teacher:
+        seat.teacher = args.teacher
+        if args.teacher.endswith(".gguf") or os.path.isfile(args.teacher):
+            seat.teacher_weights = args.teacher
+            seat.embed = True
 
-    session = Session(memory_path=None if args.no_memory else args.memory, llm=seat)
-    if args.wikidata:
-        session.realizer.lookup = Wikidata(session.knowledge)
+    if args.hear:
+        ears = _ears_only(seat)
+        if args.message:
+            print(hear_once(ears, " ".join(args.message)))
+            return 0
+        return run_hear(ears)
+
+    session = Session(
+        memory_path=None if args.no_memory else args.memory,
+        llm=seat,
+        sources=None if args.wikidata else [],
+    )
 
     if args.message:
         reply = session.respond(" ".join(args.message))
@@ -260,3 +295,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     return run_repl(session, show=args.show)
+
+
+def _ears_only(seat):
+    from .builtins import fresh_knowledge
+    from .discourse import Discourse
+    from .ears import Ears
+
+    knowledge = fresh_knowledge()
+    if seat is not None and hasattr(seat, "learn_vocabulary"):
+        seat.learn_vocabulary(knowledge)
+    return Ears(knowledge, Discourse(), seat=seat)
+
+
+def hear_once(ears, utterance: str) -> str:
+    """What the ears heard. Nothing else."""
+    heard = ears.listen(utterance)
+    text = render(heard.expr, multiline=True)
+    if heard.reason:
+        return text + "\n" + heard.reason
+    return text
+
+
+def run_hear(ears) -> int:
+    print(
+        BOLD("soup")
+        + DIM("  ears only. nothing gets realized. %s to leave" % CYAN(":q"))
+    )
+    while True:
+        try:
+            line = input(BOLD("you ") + DIM("> "))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(":"):
+            command = line[1:].split()[0] if line[1:] else ""
+            if command in ("q", "quit", "exit"):
+                break
+            print(DIM("  ears only, so :q is the whole command list"))
+            continue
+        print(GREEN(hear_once(ears, line)))
+        print()
+    return 0

@@ -1,9 +1,12 @@
 """What Soup knows: concepts, relations between them, asserted facts, and the
 conceptual rewrite rules it has been taught.
 
-Everything in here is plain serialisable data. Native (Python) realizations
-live in `builtins.py` and are registered at runtime, because you cannot write a
-closure into a JSON file and mean it.
+Everything in here is plain serialisable data. Native function realizations
+live in `builtins.py` and are registered at runtime, because you cannot write
+a closure into a JSON file and mean it. A snippet of Python or shell, as a
+rule body (`HomeDir() := Python("os.path.expanduser('~')")`), is ordinary
+data and does persist: it is a realization Soup can run today, and a note
+that a native might belong there later.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ __all__ = [
     "TRANSITIVE",
     "TAXONOMIC",
     "PROPERTIES",
+    "GRAPH_RELATIONS",
     "Evidence",
     "Edge",
     "Fact",
@@ -48,6 +52,11 @@ TRANSITIVE = "Transitive"  # a R b and b R c means a R c
 TAXONOMIC = "Taxonomic"  # the target is a more general kind than the source
 
 PROPERTIES: Tuple[str, ...] = (SYMMETRIC, TRANSITIVE, TAXONOMIC)
+
+# Relations describing how the graph itself is wired. Fine as edges, never
+# as the body of a rule: "Doing is realized by the subject" is a sentence
+# about Soup's bookkeeping wearing the clothes of a definition.
+GRAPH_RELATIONS: Tuple[str, ...] = (HAS_PROPERTY, INVERSE_OF, "RealizedBy")
 
 
 @dataclass
@@ -161,7 +170,9 @@ class Rule:
         MostAdorable(items) := Maximum(collection=items, by=AdorablenessScore())
 
     The head's `Var` arguments bind against the incoming expression and get
-    substituted into the body. No code runs; meaning is just rewritten.
+    substituted into the body. Most bodies are more concepts. A body of
+    `Python(...)` or `Shell(...)` is still a rule; the snippet is the
+    realization until a native exists.
     """
 
     head: Call
@@ -172,17 +183,30 @@ class Rule:
     def concept(self) -> str:
         return self.head.concept
 
+    @property
+    def method(self) -> Optional[str]:
+        """`python` / `shell` when this realization bottoms out in code."""
+        return code_kind(self.body)
+
     def source_text(self) -> str:
         return "%s := %s" % (
             render(self.head, multiline=False),
             render(self.body, multiline=False),
         )
 
-    def apply(self, target: Expr) -> Optional[Expr]:
+    def apply(self, target: Expr, loose: bool = True) -> Optional[Expr]:
+        """Rewrite `target` if this rule's head matches it.
+
+        `loose` allows binding by position when the argument names disagree,
+        which is how `Double(x)` fires on `Double(value=6)`. Turn it off to
+        ask the narrower question: is this rule about *this* shape, named the
+        way this call names it? That is what tells the electrical Power from
+        the exponential one.
+        """
         from .expr import substitute
 
         bindings = match(self.head, target)
-        if bindings is None:
+        if bindings is None and loose:
             bindings = self._loose_match(target)
         if bindings is None:
             return None
@@ -196,6 +220,12 @@ class Rule:
         the meaning is what matters, not the label the ears happened to pick.
         """
         if not isinstance(target, Call) or target.concept != self.head.concept:
+            return None
+        if any(a.name for a in self.head.args):
+            # A head that named its parameters is a claim about this shape:
+            # `Power(voltage, current)` is the electrical reading and has no
+            # business firing on `Power(work, time)` just because both happen
+            # to have two numbers in them. Positional heads stay forgiving.
             return None
         params = [a.value for a in self.head.args]
         if len(params) != len(target.args) or not all(isinstance(p, Var) for p in params):
@@ -249,6 +279,8 @@ class Knowledge:
                 existing.params = tuple(params)
             if kind != "concept" and existing.kind == "concept":
                 existing.kind = kind
+            if learned:
+                existing.learned = True
             return existing
         cd = ConceptDef(name, kind, tuple(params), gloss, learned)
         self.concepts[name] = cd
@@ -413,20 +445,43 @@ class Knowledge:
         body: Expr,
         evidence: Optional[Evidence] = None,
     ) -> Rule:
-        rule = Rule(head, body, evidence or Evidence(source="teacher"))
         bucket = self.rules.setdefault(head.concept, [])
+        for existing in bucket:
+            if existing.head == head and existing.body == body:
+                return existing
+        rule = Rule(head, body, evidence or Evidence(source="teacher"))
         bucket[:] = [r for r in bucket if r.head != head]
         bucket.append(rule)
-        self.define(
+        cd = self.define(
             head.concept,
             params=tuple(a.value.name for a in head.args if isinstance(a.value, Var)),
             learned=True,
         )
-        self.relate(head.concept, "RealizedBy", _body_head(body))
+        if not cd.gloss and rule.method:
+            cd.gloss = render(body, False)
+        self.relate(head.concept, "RealizedBy", _body_head(body), rule.evidence)
         return rule
 
     def rules_for(self, concept: str) -> List[Rule]:
         return self.rules.get(concept, [])
+
+    def drop_learned_rule(self, concept: str, head: Optional[Call] = None) -> None:
+        """Unfile a teacher rule that did not help the question that prompted it.
+
+        With a `head`, only that shape goes. A word is allowed several
+        meanings, so a bad reading of `Power(subject)` is no reason to forget
+        that `Power(voltage, current)` is watts.
+        """
+        bucket = self.rules.get(concept) or []
+        kept = [
+            r
+            for r in bucket
+            if r.evidence.source == "builtin" or (head is not None and r.head != head)
+        ]
+        if kept:
+            self.rules[concept] = kept
+        else:
+            self.rules.pop(concept, None)
 
     def learned_rules(self) -> List[Rule]:
         out: List[Rule] = []
@@ -436,12 +491,19 @@ class Knowledge:
 
     # -- persistence -------------------------------------------------------
     def to_json(self) -> dict:
+        """Only what was learned. The seed lives in code; overheard names die with the process."""
+        rules = [
+            r for bucket in self.rules.values() for r in bucket
+            if r.evidence.source != "builtin"
+        ]
+        facts = [f for f in self.facts if f.evidence.source != "builtin"]
+        edges = [e for e in self.edges if e.evidence.source != "builtin"]
         return {
             "version": 1,
-            "concepts": [c.to_json() for c in self.concepts.values()],
-            "edges": [e.to_json() for e in self.edges],
-            "facts": [f.to_json() for f in self.facts],
-            "rules": [r.to_json() for bucket in self.rules.values() for r in bucket],
+            "concepts": [c.to_json() for c in self.concepts.values() if c.learned],
+            "edges": [e.to_json() for e in edges],
+            "facts": [f.to_json() for f in facts],
+            "rules": [r.to_json() for r in rules],
             "notes": self.notes,
             "common_nouns": sorted(self.common_nouns),
         }
@@ -449,21 +511,43 @@ class Knowledge:
     def load_json(self, data: dict) -> None:
         for c in data.get("concepts", []):
             cd = ConceptDef.from_json(c)
-            self.concepts[cd.name] = cd
+            if not cd.learned:
+                continue
+            existing = self.concepts.get(cd.name)
+            if existing is None:
+                self.concepts[cd.name] = cd
+                continue
+            existing.learned = True
+            if cd.params and not existing.params:
+                existing.params = cd.params
+            if cd.gloss and not existing.gloss:
+                existing.gloss = cd.gloss
+            if cd.kind != "concept" and existing.kind == "concept":
+                existing.kind = cd.kind
         for e in data.get("edges", []):
-            self.edges.append(Edge.from_json(e))
+            edge = Edge.from_json(e)
+            if edge.evidence.source == "builtin":
+                continue
+            self.relate(edge.source, edge.relation, edge.target, edge.evidence)
         for f in data.get("facts", []):
             try:
-                self.facts.append(Fact.from_json(f))
+                fact = Fact.from_json(f)
             except Exception:
                 continue
+            if fact.evidence.source == "builtin":
+                continue
+            self.assert_fact(fact.proposition, fact.truth, fact.evidence)
         for r in data.get("rules", []):
             try:
                 rule = Rule.from_json(r)
             except Exception:
                 continue
-            self.rules.setdefault(rule.concept, []).append(rule)
-        self.notes.extend(data.get("notes", []))
+            if rule.evidence.source == "builtin":
+                continue
+            self.add_rule(rule.head, rule.body, rule.evidence)
+        for note in data.get("notes", []):
+            if note not in self.notes:
+                self.notes.append(note)
         self.common_nouns.update(data.get("common_nouns", []))
 
     def save(self, path: str) -> None:
@@ -507,3 +591,9 @@ def _body_head(body: Expr) -> str:
     if isinstance(body, Call):
         return body.concept
     return "Value"
+
+
+def code_kind(body: Expr) -> Optional[str]:
+    if isinstance(body, Call) and body.concept in ("Python", "Shell", "Bash"):
+        return "python" if body.concept == "Python" else "shell"
+    return None

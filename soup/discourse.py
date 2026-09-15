@@ -33,6 +33,8 @@ class Discourse:
     bindings: Dict[str, Expr] = field(default_factory=dict)
     pending_teach: Optional[str] = None
     pending_param: Optional[str] = None
+    pending_ask: Optional[Expr] = None
+    pending_ask_from: Optional[Expr] = None
 
     # -- updates -----------------------------------------------------------
     def note_entity(self, name: str) -> None:
@@ -58,6 +60,9 @@ class Discourse:
                 return
         if isinstance(expr, Seq):
             self.last_collection = expr
+            if expr.items:
+                self.last_value = expr.items[-1]
+                return
         self.last_value = expr
 
     def record(self, turn: Turn) -> None:
@@ -74,7 +79,7 @@ class Discourse:
             return Var(self.pending_param)
         if w in ("it", "that", "this", "one"):
             return self.last_value or self.last_entity
-        if w in ("them", "those", "these", "they"):
+        if w in ("them", "those", "these", "they", "each", "every"):
             return self.last_collection or self.last_value
         if w in ("he", "him", "she", "her", "his", "hers"):
             return self.last_entity

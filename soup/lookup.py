@@ -1,46 +1,40 @@
-"""Answering out of Wikidata, and keeping what comes back.
+"""Use Wikidata as a fact source and keep what comes back.
 
 A model asked for a fact will produce something fact-shaped. Wikidata asked
 for a fact will produce the fact, or nothing, which is the more useful pair of
-outcomes. So this sits ahead of the seat: anything with an actual answer
-should be looked up, and only the rest is worth guessing at.
+outcomes. Its requests, exact-match filtering, and claim selection are
+realized from the Wikidata concepts seeded by :mod:`soup.builtins`. This
+module maps a missing fact to those concepts, converts Wikidata's typed
+value, and remembers useful identifiers and glosses.
 
-The lookup is also the one resolution strategy that extends the vocabulary as
-a side effect of being used. Asking for the height of the Eiffel Tower means
-finding out that `Height` is Wikidata's P2048 and that the Eiffel Tower is
-Q243, and both of those are worth writing down:
+Using the source also extends the vocabulary. Asking for the height of the
+Eiffel Tower means finding out that `Height` is Wikidata's P2048 and that the
+Eiffel Tower is Q243, and both of those are worth writing down:
 
     Height(subject=EiffelTower())
       -> WikidataProperty(name=Height(), value="P2048")     learned
       -> WikidataId(name=EiffelTower(), value="Q243")       learned
       -> Height(subject=EiffelTower(), value="324 metres")  answered
 
-The identifiers come back as ordinary facts, so the second question about
-that entity is cheaper than the first, and the concepts themselves get
-defined with Wikidata's own description as their gloss. A concept that was a
-gap five seconds ago is now a concept soup knows the meaning of.
+Every search hit and every statement from the claims response is also kept as
+a source-tagged `WikidataSearchResult` or `WikidataStatement` fact. The
+identifiers come back as ordinary facts, so the second question about that
+entity is cheaper, and the concepts get Wikidata's own descriptions as glosses.
 
-Nothing here is imported by the rest of soup unless you ask for it, and
-nothing here is required: with no network, `available` goes false and
-realization carries on exactly as it did before.
+The command line can include this as one of the realizer's generic fact
+sources. With no network, `Fetch` returns `Unknown`, this source disables
+itself, and realization carries on with the next source.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 from typing import Dict, List, Optional
 
 from .expr import Arg, Call, Expr, Lit, Var, call
 from .knowledge import Evidence, Knowledge
 
 ENDPOINT = "https://www.wikidata.org/w/api.php"
-
-# Wikimedia asks for a descriptive agent and is entitled to one.
-AGENT = "soup/0.1 (https://github.com/kealjones/soup) python-urllib"
 
 # Where a learned identifier is kept. Facts, like everything else, so they
 # survive a restart and show up in `:facts` with wikidata as their source.
@@ -68,12 +62,20 @@ class Wikidata:
     def __init__(
         self,
         knowledge: Optional[Knowledge] = None,
-        timeout: float = 6.0,
-        endpoint: str = ENDPOINT,
+        seat=None,
     ) -> None:
         self.knowledge = knowledge
-        self.timeout = timeout
-        self.endpoint = endpoint
+        from .realize import Realizer
+
+        # The HTTP requests and their selection logic are ordinary concepts.
+        # This small evaluator has no outside sources of its own, so a failed
+        # Fetch simply returns Unknown instead of recursing back into us.
+        self.realizer = Realizer(knowledge) if knowledge is not None else None
+        # Only ever asked what a property is *called*. See `_paraphrased`.
+        self.seat = seat
+        # Set for the length of one lookup when a list-op was really asking
+        # for the minimum / maximum of an attribute. See `_realize_attribute`.
+        self.specifically: Optional[str] = None
         self.available = True
         self.last_error: Optional[str] = None
         self.calls = 0
@@ -86,7 +88,7 @@ class Wikidata:
         well formed and the world does not happen to record it, which is the
         point at which guessing becomes someone else's job.
         """
-        if not self.available:
+        if not self.available or self.realizer is None:
             return None
         subject = expr.first(*_SUBJECT)
         text = _subject_text(subject)
@@ -100,7 +102,7 @@ class Wikidata:
         # lying around for a question we never answered.
         prop = None
         if expr.concept not in _DESCRIBING:
-            prop = self._property(expr.concept)
+            prop = self._property(expr.concept, text)
             if prop is None:
                 return None
 
@@ -110,7 +112,7 @@ class Wikidata:
         if prop is None:
             gloss = entity.get("description")
             return Lit(gloss) if gloss else None
-        return self._claim(entity["id"], prop)
+        return self._claim(entity["id"], prop, subject, expr.concept)
 
     # -- naming things ----------------------------------------------------
     def _entity(self, subject: Call, text: str) -> Optional[Dict[str, str]]:
@@ -126,7 +128,7 @@ class Wikidata:
         self._teach(subject.concept, "entity", hit.get("description", ""))
         return {"id": hit["id"], "description": hit.get("description", "")}
 
-    def _property(self, concept: str) -> Optional[str]:
+    def _property(self, concept: str, subject: Optional[str] = None) -> Optional[str]:
         """Find the P-id for a concept, remembering it and what it means.
 
         A concept we can already act on is never looked up, because this is
@@ -135,17 +137,59 @@ class Wikidata:
         it though: `Height` is defined as an attribute and has no
         realization at all, which is precisely the hole P2048 fills.
         """
-        known = self._recall(PROPERTY_OF, concept)
+        specifically = getattr(self, "specifically", None)
+        stored = _qualified(concept, specifically)
+        known = self._recall(PROPERTY_OF, stored)
         if known is not None:
             return known
         if self._realizable(concept):
             return None
-        hit = self._search(words_of(concept), "property")
+        hit = None
+        if specifically:
+            # "minimum number of players" is what Wikidata actually calls
+            # it. Searching that first means this question does not need a
+            # model at all, once Minimum has been peeled off Players.
+            for phrase in (
+                "%s number of %s" % (specifically, words_of(concept)),
+                "%s %s" % (specifically, words_of(concept)),
+            ):
+                hit = self._search(phrase, "property")
+                if hit is not None:
+                    break
+        if hit is None:
+            hit = self._search(words_of(concept), "property")
+        if hit is None:
+            hit = self._paraphrased(concept, subject, specifically)
         if hit is None:
             return None
-        self._keep(PROPERTY_OF, concept, hit["id"])
+        self._keep(PROPERTY_OF, stored, hit["id"])
         self._teach(concept, "relation", hit.get("description", ""))
         return hit["id"]
+
+    def _paraphrased(
+        self, concept: str, subject: Optional[str], specifically: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Ask a model what this property is *called*, then look that up.
+
+        Wikidata files how many people play chess under "minimum number of
+        players". Nobody asks a question in those words, and `Players`
+        matches no label at all, so a fact that is sitting right there gets
+        missed and the question falls through to somebody guessing.
+
+        This is the smallest job a model can usefully be given. It supplies
+        a word, never a value: the suggestion still has to match a real
+        property name exactly, and the answer still comes out of the
+        record. A wrong guess finds nothing, which is the failure mode you
+        want. The P-id it lands on is kept as an ordinary fact, so you can
+        see which property answered you and say it was the wrong one.
+        """
+        if self.seat is None or not getattr(self.seat, "available", True):
+            return None
+        for name in self.seat.property_names(concept, subject, specifically):
+            hit = self._search(name, "property")
+            if hit is not None:
+                return hit
+        return None
 
     def _realizable(self, concept: str) -> bool:
         """Can soup already do something with this concept on its own?"""
@@ -171,38 +215,41 @@ class Wikidata:
         alias, because "height" is the label of P2048 and merely an alias of
         "elevation above sea level".
         """
-        data = self._get(
-            action="wbsearchentities",
-            search=text,
-            language="en",
-            uselang="en",
-            type=kind,
-            limit=10,
+        hits = self._realize(
+            call("WikidataSearchResults", text=Lit(text), kind=Lit(kind))
         )
-        hits = (data or {}).get("search") or []
-        for wanted in ("label", "alias"):
-            for hit in hits:
-                match = hit.get("match") or {}
-                if match.get("type") != wanted:
-                    continue
-                if (match.get("text") or "").lower() == text.lower():
-                    return hit
+        self._remember_search_results(text, kind, hits)
+        hit = self._realize(
+            call("WikidataSearchHit", results=hits, text=Lit(text))
+        )
+        if not _is_unknown(hit):
+            value = _to_python(hit)
+            if isinstance(value, dict) and value.get("id"):
+                return value
         self.last_error = "wikidata has no %s called %r" % (kind, text)
         return None
 
     # -- reading a value --------------------------------------------------
-    def _claim(self, qid: str, pid: str) -> Optional[Expr]:
-        data = self._get(action="wbgetclaims", entity=qid, property=pid)
-        statements = ((data or {}).get("claims") or {}).get(pid) or []
-        chosen = _best(statements)
-        if chosen is None:
+    def _claim(
+        self,
+        qid: str,
+        pid: str,
+        subject: Optional[Call] = None,
+        attribute: Optional[str] = None,
+    ) -> Optional[Expr]:
+        statements = self._realize(
+            call("WikidataClaims", entity=Lit(qid), property=Lit(pid))
+        )
+        self._remember_statements(qid, pid, statements, subject, attribute)
+        chosen = self._realize(call("WikidataBestStatement", statements=statements))
+        if _is_unknown(chosen):
             return None
-        snak = chosen.get("mainsnak") or {}
-        if snak.get("snaktype") != "value":
+        snak = _field(chosen, "mainsnak")
+        if _text(_field(snak, "snaktype")) != "value":
             # Wikidata can record "known to have no value", which is an
             # answer, but not one we have anywhere to put yet.
             return None
-        return self._value(snak.get("datavalue") or {})
+        return self._value(_to_python(_field(snak, "datavalue")) or {})
 
     def _value(self, datavalue: Dict) -> Optional[Expr]:
         kind = datavalue.get("type")
@@ -241,18 +288,85 @@ class Wikidata:
         wanted = [i for i in ids if i]
         if not wanted:
             return {}
-        data = self._get(
-            action="wbgetentities",
-            ids="|".join(wanted),
-            props="labels",
-            languages="en",
-        )
+        data = self._realize(call("WikidataEntities", ids=Lit("|".join(wanted))))
         out = {}
-        for qid, body in ((data or {}).get("entities") or {}).items():
-            label = ((body.get("labels") or {}).get("en") or {}).get("value")
-            if label:
-                out[qid] = label
+        for qid in wanted:
+            body = _field(data, qid)
+            label = _field(_field(_field(body, "labels"), "en"), "value")
+            if isinstance(label, Lit) and isinstance(label.value, str):
+                out[qid] = label.value
+                self._remember(
+                    Call(
+                        "WikidataEntityLabel",
+                        (
+                            Arg("id", Lit(qid)),
+                            Arg("language", Lit("en")),
+                            Arg("value", label),
+                        ),
+                    )
+                )
         return out
+
+    def _remember_search_results(self, text: str, kind: str, hits: Expr) -> None:
+        from .expr import Seq
+
+        if not isinstance(hits, Seq):
+            return
+        for hit in hits.items:
+            self._remember(
+                Call(
+                    "WikidataSearchResult",
+                    (
+                        Arg("query", Lit(text)),
+                        Arg("kind", Lit(kind)),
+                        Arg("id", _field(hit, "id") or Lit(None)),
+                        Arg("label", _field(hit, "label") or Lit(None)),
+                        Arg("description", _field(hit, "description") or Lit(None)),
+                        Arg("match", _field(hit, "match") or Call("Object")),
+                        Arg("data", hit),
+                    ),
+                )
+            )
+
+    def _remember_statements(
+        self,
+        qid: str,
+        pid: str,
+        statements: Expr,
+        subject: Optional[Call],
+        attribute: Optional[str],
+    ) -> None:
+        from .expr import Seq
+
+        if not isinstance(statements, Seq):
+            return
+        for statement in statements.items:
+            snak = _field(statement, "mainsnak") or Call("Object")
+            datavalue = _field(snak, "datavalue") or Call("Object")
+            qualifiers = _field(statement, "qualifiers") or Call("Object")
+            args = [
+                Arg("entityId", Lit(qid)),
+                Arg("propertyId", Lit(pid)),
+                Arg("rank", _field(statement, "rank") or Lit("normal")),
+                Arg("snaktype", _field(snak, "snaktype") or Lit(None)),
+                Arg("valueType", _field(datavalue, "type") or Lit(None)),
+                Arg("value", _field(datavalue, "value") or Lit(None)),
+                Arg("qualifiers", qualifiers),
+                Arg("data", statement),
+            ]
+            if subject is not None:
+                args.insert(0, Arg("subject", subject))
+            if attribute:
+                args.insert(1 if subject is not None else 0, Arg("attribute", call(attribute)))
+            self._remember(Call("WikidataStatement", tuple(args)))
+
+    def _remember(self, proposition: Expr) -> None:
+        if self.knowledge is not None:
+            self.knowledge.assert_fact(
+                proposition,
+                True,
+                Evidence(source="wikidata", note="complete API result"),
+            )
 
     # -- remembering ------------------------------------------------------
     def _recall(self, relation: str, named) -> Optional[str]:
@@ -298,29 +412,61 @@ class Wikidata:
         known = self.knowledge.concept(concept)
         return known.gloss if known is not None else ""
 
-    # -- the wire ---------------------------------------------------------
-    def _get(self, **params) -> Optional[Dict]:
-        params.setdefault("format", "json")
-        params.setdefault("formatversion", "1")
-        url = self.endpoint + "?" + urllib.parse.urlencode(params)
-        request = urllib.request.Request(
-            url, headers={"User-Agent": AGENT, "Accept": "application/json"}
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                self.calls += 1
-                return json.loads(response.read().decode("utf-8"))
-        except TimeoutError:
-            # Slow once is not the same as gone. Stay available.
-            self.last_error = "wikidata timed out"
-            return None
-        except (urllib.error.URLError, OSError) as problem:
-            self.available = False
-            self.last_error = "wikidata unreachable: %s" % problem
-            return None
-        except (ValueError, AttributeError) as problem:
-            self.last_error = "wikidata sent something odd: %s" % problem
-            return None
+    # -- running the Wikidata concepts -----------------------------------
+    def _realize(self, expr: Expr) -> Expr:
+        if self.realizer is None:
+            return call("Unknown", about=expr)
+        result = self.realizer.realize(expr)
+        self.calls += sum(effect.startswith("fetched ") for effect in result.effects)
+        for note in result.trace:
+            if "fetch failed:" in note:
+                self.available = False
+                self.last_error = note
+            elif "fetch timed out:" in note:
+                self.last_error = note
+        return result.value
+
+
+def _is_unknown(expr: Expr) -> bool:
+    from .expr import walk
+
+    return any(
+        isinstance(node, Call) and node.concept in ("Unknown", "Nothing")
+        for node in walk(expr)
+    )
+
+
+def _field(expr: Optional[Expr], name: str) -> Optional[Expr]:
+    return expr.get(name) if isinstance(expr, Call) else None
+
+
+def _text(expr: Optional[Expr]) -> Optional[str]:
+    return expr.value if isinstance(expr, Lit) and isinstance(expr.value, str) else None
+
+
+def _to_python(expr: Optional[Expr]):
+    if isinstance(expr, Lit):
+        return expr.value
+    if isinstance(expr, Call):
+        return {a.name: _to_python(a.value) for a in expr.args if a.name}
+    if isinstance(expr, (list, tuple)):
+        return [_to_python(item) for item in expr]
+    from .expr import Seq
+
+    if isinstance(expr, Seq):
+        return [_to_python(item) for item in expr.items]
+    return expr
+
+
+def _qualified(concept: str, specifically: Optional[str]) -> str:
+    """The cache key for a property, when min/max was part of the question.
+
+    Looking up Players of Chess for "how many" and for "the maximum" must
+    not share a P-id. Wikidata has both P1872 and P1873.
+    """
+    if not specifically:
+        return concept
+    return specifically[:1].upper() + specifically[1:] + concept
 
 
 def _subject_text(subject) -> Optional[str]:
@@ -341,20 +487,6 @@ def _subject_text(subject) -> Optional[str]:
         parts.append(words_of(inner.concept))
     parts.append(words_of(subject.concept))
     return " ".join(parts)
-
-
-def _best(statements: List[Dict]) -> Optional[Dict]:
-    """The statement that is true now.
-
-    France has ten capitals on record and nine of them stopped being the
-    capital some time ago, so rank and end date are not details.
-    """
-    live = [s for s in statements if s.get("rank") != "deprecated"]
-    current = [s for s in live if "P582" not in (s.get("qualifiers") or {})]
-    pool = current or live
-    preferred = [s for s in pool if s.get("rank") == "preferred"]
-    chosen = preferred or pool
-    return chosen[0] if chosen else None
 
 
 def _number(amount) -> Optional[float]:
