@@ -3,7 +3,7 @@
 A small conversational system that thinks in concepts instead of tokens. No
 API key. A local model sits in-process and does the listening.
 
-A model reads the sentence, and that is all it does. Everything after that is
+A model reads the sentence, and that is its main job. Everything after that is
 Soup's: what the concepts mean, how they resolve, what gets learned when one
 of them is missing, and what gets kept. When Soup meets an idea it does not
 have, it works out a definition, files it as an ordinary rule you can read and
@@ -25,11 +25,17 @@ you  > what is the vibe of [7,8]
 soup > it's 2
 ```
 
+Status: an experiment, no longer under active development (last commit
+2026-09-15). See [History](#history) for where it sits in the line of projects.
+
 ## Running it
 
-Needs Python 3.9 or newer and a model. On this Mac that means MLX: soup
-loads `qwen3.5:4b` for hearing and `qwen3.5:9b` for define, in-process, no
-server. First run downloads the 4-bit weights into the Hugging Face cache.
+Needs Python 3.9 or newer and a model. On Apple Silicon that means MLX: soup
+loads `qwen3.5:4b` (`mlx-community/Qwen3.5-4B-MLX-4bit`) in-process, no
+server, and the first run downloads the 4-bit weights into the Hugging Face
+cache. That model hears and speaks. Defining concepts and answering facts go
+to a larger teacher model, `qwen3.8:27b` by default; if it cannot be loaded,
+the ears model fills in rather than Soup going deaf.
 
 ```sh
 python3 -m venv .venv
@@ -37,27 +43,51 @@ python3 -m venv .venv
 ./chat
 ```
 
-Ollama is optional. If you already `ollama pull`'d something, `--llm` still
-accepts those names; they map onto the matching MLX repo. A path to a `.gguf`
-or `$SOUP_LLM_URL` still work if you would rather. `$SOUP_TEACHER_MODEL`
-picks the define chair (default `qwen3.5:9b`).
+`requirements.txt` pulls in `mlx` and `mlx-lm`, `llama-cpp-python` (for
+`.gguf` files), `ddgs` for keyless web search, and `mlx-whisper` on Apple
+Silicon. `./chat` is a launcher that finds a new enough Python (or uses
+`.venv`) and runs `python -m soup`.
+
+Ollama is optional. Ollama-style names still work with `--llm` and
+`--teacher`; the `qwen3.5` sizes 0.8b, 2b, 4b and 9b map onto their MLX
+repos, and other names are looked for among Ollama's downloaded weights. A
+path to a `.gguf` loads through llama.cpp. `$SOUP_LLM_URL` points the seat at
+a server instead, and `$SOUP_LLM_MODEL`, `$SOUP_TEACHER_MODEL`,
+`$SOUP_LLM_WEIGHTS`, `$SOUP_LLM_KEY` and `$SOUP_LLM_TIMEOUT` tune it.
 
 ```sh
 ./chat                          # talk to it
 ./chat --show                   # talk to it, printing the concept structures
 ./chat "what is 6 times 7"      # say one thing and quit
 ./chat --no-memory              # do not read or write data/memory.json
+./chat --memory path.json       # keep memory somewhere else
 ./chat --hear                   # print what the ears heard; do not realize
+./chat --llm qwen3.5:9b         # a different listening model
+./chat --teacher qwen3.5:9b     # a different define/answer model
+./chat --no-wikidata            # guess, or ask, instead of looking facts up
+./chat --deaf                   # no model. soup will not understand a word
 
-python3 -m unittest discover -s tests
-python3 scripts/sweep.py        # talk at it with 50-odd utterances at once
+python3 -m unittest discover -s tests   # 236 tests, no model needed
+python3 scripts/sweep.py                # talk at it with 50-odd utterances at once
 ```
 
-Layers, terms, and which file is which: [GETTING_STARTED.md](GETTING_STARTED.md).
+Layers, terms, and which file is which, at length: [GETTING_STARTED.md](GETTING_STARTED.md).
 
-In the chat, `:help` lists the commands. The useful ones are `:ears` (the
-concept expression your last message became), `:why` (how it got the answer),
-`:rules` (realizations it has been taught) and `:facts`.
+In the chat, `:help` lists the commands:
+
+| command | what it shows |
+| --- | --- |
+| `:ears` | the concept expression your last message became |
+| `:answer` | the concept structure soup answered with |
+| `:why` | how it got there |
+| `:know` | what soup knows, in numbers |
+| `:concepts [word]` | concepts, with glosses when filtered |
+| `:facts [word]` | remembered facts |
+| `:rules` | realizations it has been taught |
+| `:show` / `:quiet` | print ears and answer every turn, or stop |
+| `:save` | write memory to disk |
+| `:wipe` | forget everything learned this session and reseed |
+| `:q` | leave |
 
 ## The idea
 
@@ -67,7 +97,7 @@ English goes away as early as possible and comes back as late as possible.
 ```
                  "if greg has the car he probably left"
                                   |
-                                EARS
+                                HEAR
                                   |
                                   v
           Conditional(condition=Has(subject=Greg, object=Car),
@@ -83,7 +113,7 @@ English goes away as early as possible and comes back as late as possible.
                     v                           v
              concept structure               TEACHER
                     |                  "teach me MostAdorable"
-                  MOUTH                        |
+                  SPEAK                        |
                     |                    new realization
                     v                          |
               "yeah, probably" <---------------+
@@ -109,6 +139,10 @@ told (`Age(subject=Alice)`). They compose, so a learned concept immediately
 becomes material for the next one. Tools terminate in effects; these can
 terminate in more thought.
 
+Hearing, talking and learning are concepts too. A turn is realizing
+`Turn(text)`, and `Hear`, `Speak` and `Teach` are ordinary entries in the
+vocabulary, realized like any other.
+
 The payoff is the failure mode. Because the ears already said exactly which
 concept failed and the shape it was used in, not knowing something is
 surgical:
@@ -129,13 +163,23 @@ That is a much better question than "what does this whole sentence mean".
 | `parse.py` | reads the Python-ish syntax, including `Head(x) := Body` |
 | `knowledge.py` | concepts, relations, remembered facts, taught rules, persistence |
 | `realize.py` | resolves an expression as far as it can and records what it could not |
-| `builtins.py` | the starting vocabulary and the realizations that bottom out in code |
-| `ears.py` | English to concepts. a hundred lines, because a model does the reading |
-| `seat.py` | the model's seat, and the only three things it may be asked |
-| `mouth.py` | concepts to casual English |
+| `builtins.py` | the starting vocabulary and the realizations that bottom out in code, including `Turn`, `Hear` and `Speak` |
+| `ears.py` | English to concepts, and the checks on what the model hands back |
+| `seat.py` | the models' seat, and the only things they may be asked |
+| `local.py` | loads weights in-process (MLX, or llama.cpp for `.gguf`) |
 | `teacher.py` | turns a gap into a question, and an answer into a realization |
+| `lookup.py` | Wikidata: search, claims, property names, provenance |
+| `web.py` | keyless web search, page reading, Wikipedia |
 | `discourse.py` | what "it" and "that" currently point at |
-| `session.py` | the loop that wires all of the above together |
+| `session.py` | holds knowledge, discourse and the seat; one turn realizes `Turn(text)` |
+| `cli.py` | the chat loop and its commands |
+| `bench.py` | exam conditions for multiple-choice benches (MMLU-Pro) |
+
+`scripts/sweep.py` is the "does it feel like talking to something" check,
+`scripts/mmlu_pro.py` runs MMLU-Pro against Soup or a bare Qwen for
+comparison, and `scripts/code_ir_spike.py` is a throwaway spike comparing
+Python's `ast` with a 4B model at turning code into Soup expressions.
+`tasks/later.md` holds ideas not done yet.
 
 ### Not knowing, in three flavours
 
@@ -145,7 +189,7 @@ Soup distinguishes them, because they call for different replies.
   to evaluate.
 - **A thing it was never told.** `Age(subject=Carl)` becomes
   `Unknown(about=...)`, which propagates up so the answer names the thing that
-  was actually missing rather than the outermost operation. Mouth says "i
+  was actually missing rather than the outermost operation. The reply is "i
   don't have Carl's age".
 - **A word it does not have a meaning for.** `MostAdorable(collection=...)`
   records a `Gap`, and the Teacher asks about exactly that concept with
@@ -187,34 +231,53 @@ list, which is not learning either, so it looked clever on its own examples
 and fell over on the next thing anybody said.
 
 Reading a sentence is the one part of this design that is solved better
-elsewhere. So a model does it, from a seat with exactly three methods on it:
+elsewhere. So a model does it, from a seat with a short, fixed list of
+questions it may be asked. Each is narrow, and they are tried in order of
+what the result is worth:
 
-| | |
-|---|---|
-| `hear()` | what did this sentence mean? shape only, never an answer |
-| `define()` | what does this concept mean, in terms of ones we have? |
-| `answer()` | what is this worth, if nothing else could tell us? |
+| | model | |
+|---|---|---|
+| `hear()` | ears | what did this sentence mean? shape only, never an answer |
+| `define()` | teacher | what does this concept mean, in terms of ones we have? |
+| `answer()` | teacher | what is this worth, if nothing else could tell us? |
+| `property_names()` | teacher | what would a record keeper call this property? |
+| `settle()` | teacher | which of these options, when everything else came up empty? |
+| `speak()` | ears | say this finished answer in English, adding nothing |
 
-```sh
-./chat                              # 4b hears, 9b defines, in-process
-./chat --llm qwen3.5:4b
-./chat --teacher qwen3.5:9b
-./chat --llm /path/to/model.gguf
-SOUP_LLM_URL=http://localhost:1234/v1/chat/completions ./chat   # still works
-./chat --deaf                       # no model. soup will not understand a word
+Nothing outside the seat talks to a model, and nothing that comes back is
+trusted for having come from one. Concepts invented out of thin air are
+rejected, restatements of the question are rejected, and a definition built
+from things Soup does not have is thrown out by the Teacher. The prompt
+carries the real concept vocabulary grouped by kind, which is what stops a
+model inventing `Times` and `HowOld` alongside the `Multiply` and `Age`
+already present.
+
+The ears are allowed to be baffled. They are not allowed to make things up,
+and a small model asked "who is albert einstein" will genuinely hand back a
+concept named `Alice`. The line drawn is between naming and inventing: a
+model may name a relation you never said, because reading "turn the volume
+down" as `Decrease(target=Volume())` is the paraphrase we want from it, but
+it may not introduce a *thing* that was never mentioned. Heads are free;
+leaves are checked against what was actually spoken.
+
+```
+you  > make this picture look spooky but still cute
+       Request(action=Make(target=Ref("this"), look=AllOf(Spooky(), Cute())))
+soup > i don't know Make. teach me: Make(target=target, look=look) := ...
 ```
 
-Nothing else in Soup talks to a model, and nothing that comes back is trusted
-for having come from one. Concepts invented out of thin air are rejected,
-restatements of the question are rejected, and a definition built from things
-Soup does not have is thrown out by the Teacher. The prompt carries the real
-concept vocabulary grouped by kind, which is what stops a model inventing
-`Times` and `HowOld` alongside the `Multiply` and `Age` already present.
+### Speaking
+
+Soup's answer is the concept expression. `Speak` only chooses words for it:
+the seat is handed the finished expression and told to add nothing, because a
+mouth that decides facts is a second brain disagreeing with the first. Text
+that came back from a lookup is said as the source wrote it rather than
+paraphrased. A style is a concept too (`Speak(of=X, style=Pirate())`). With no
+model in the chair, the expression goes out as it is.
 
 ### Working it out instead of asking
 
-The three seat methods are listed in order of what they are worth, and the
-middle one is the interesting one. An answer helps once. A definition is kept.
+`define()` is the interesting one. An answer helps once. A definition is kept.
 
 So when a concept will not resolve, Soup asks what it *means* before it asks
 what it is worth:
@@ -246,40 +309,20 @@ parameterised the same way, filed as the same kind of ordinary rule. Only the
 source differs. Asking you is still there, as the last resort it should always
 have been.
 
-The prompt is given the concept vocabulary grouped by kind, which is what
-stops a model inventing `Times` and `HowOld` next to the `Multiply` and
-`Age` already sitting there.
-
-The ears are allowed to be baffled. They are not allowed to make things up,
-and a small model asked "who is albert einstein" will genuinely hand back a
-concept named `Alice`. The line drawn is between naming and inventing: a
-model may name a relation you never said, because reading "turn the volume
-down" as `Decrease(target=Volume())` is the paraphrase we want from it, but
-it may not introduce a *thing* that was never mentioned. Heads are free;
-leaves are checked against what was actually spoken.
-
-The ears are allowed to be baffled. They are not allowed to make things up,
-and a small model asked "who is albert einstein" will genuinely hand back a
-concept named `Alice`. So every name the model produces has to be one we
-already know, one of our own structural wrappers, or a word the speaker
-actually said. Anything else is thrown out and the sentence falls through to
-the ordinary structural parse.
-
-```
-you  > make this picture look spooky but still cute
-       Request(action=Make(target=Ref("this"), look=AllOf(Spooky(), Cute())))
-soup > i don't know Make. teach me: Make(target=target, look=look) := ...
-```
+Holes get thought about before they get asked about. `Solve` puts a hole to
+itself as a question (`Kind(of=Chess())` lands as `IsA(Chess, Game)` plus
+`Players(Chess)=2`), files what survives the Teacher, and realizes again,
+within a budget. GETTING_STARTED.md walks through it.
 
 ### Asking, as opposed to guessing
 
-The same model gets a second, separate job. There are two ways to not know
-something, and only one of them is a language problem:
+There are two ways to not know something, and only one of them is a language
+problem:
 
 - *I don't know that word.* A hole in the vocabulary. Only you can fill it,
   so the Teacher asks you.
 - *I don't know that fact.* A hole in the world. Anyone could fill it, and a
-  model is right there.
+  record or a model is right there.
 
 Soup used to send both to you, which is how "who is albert einstein" turned
 into a request to be taught the verb *to be*. Now a question that nothing
@@ -308,15 +351,9 @@ we can do ourselves: outside is the last thing tried, never the first.
 A model asked for a fact will produce something fact-shaped. Wikidata asked
 for a fact produces the fact, or nothing, which is a far more useful pair of
 outcomes. So sources are tried in order of how much they deserve to be
-believed, and a record beats a guess:
-
-```
-./chat                       # wikidata is on
-./chat --no-wikidata         # guess, or ask, instead of looking it up
-```
-
-`Session()` enables the same source by default for Python callers. Pass
-`sources=[]` to keep a session offline or to provide only your own sources.
+believed, and a record beats a guess. Wikidata is on by default, in `./chat`
+and for Python callers of `Session()`; pass `sources=[]` to keep a session
+offline or to provide only your own sources.
 
 ```
 you  > when was albert einstein born
@@ -345,6 +382,11 @@ Wikidata's own description as its gloss, so a word that was a gap five
 seconds ago is one soup can now tell you the meaning of. That is the sense in
 which it teaches itself: not by being told, but by having gone and looked.
 
+When nobody asks in Wikidata's words (`Players` matches no property label),
+the teacher is asked what the property is *called*, never what the value is.
+The suggestion has to match a real property name exactly, so a bad guess
+finds nothing rather than a wrong fact with a citation stapled to it.
+
 Search is a ranking rather than a lookup, so only an exact name counts, label
 before alias. Those choices are `Filter` and `First` rules over the structured
 JSON returned by `WikidataSearch`; statement rank and end dates use the same
@@ -359,12 +401,12 @@ the requested property as `WikidataSearchResult` and `WikidataStatement`
 facts. The chosen answer is still filtered by exact label, rank, and end date;
 the other returned records remain available in `:facts` and saved memory.
 
-### Search and read the web
+### A world to act in
 
-Soup also has explicit, keyless web actions. Their results stay in Soup's
-concept language: `SearchResults` contains `SearchResult` values, and
-`WebPage` contains sections and links. The mouth speaks source text when
-answering, while the full structured result remains available to Soup:
+Soup also has explicit, keyless actions. Their results stay in Soup's concept
+language: `SearchResults` contains `SearchResult` values, and `WebPage`
+contains sections and links. When answering, the source text is spoken, while
+the full structured result remains available to Soup:
 
 ```
 search the web for concept-based AI assistants
@@ -377,15 +419,14 @@ look up Ada Lovelace on Wikipedia
 Request(action=WikipediaSearch(query="Ada Lovelace"))
 ```
 
-`TranscribeAudio(path="/path/to/recording.wav")` runs Whisper locally. On
-Apple Silicon, `mlx-whisper` is installed with the project requirements and
-downloads its model on first use. No search, page-reading, or transcription
-API key is needed. These are actions Soup takes when asked; they are separate
-from the automatic Wikidata fact source.
-
-The model is in-process. On Apple Silicon that is MLX running a 4-bit
-Qwen3.5-4B; a Hugging Face id or a `.gguf` path also work. A server is still
-accepted if `$SOUP_LLM_URL` is set.
+`TranscribeAudio(path="/path/to/recording.wav")` runs Whisper locally through
+`mlx-whisper` on Apple Silicon, which downloads its model on first use. Files
+are concepts as well (`File`, `Read`, `Write`, `Files`, `Delete`, `PathOf`,
+`Join`), as are `Url`, `Fetch`, `Json` and `GetProperty`, so Wikidata itself
+is reached through ordinary rules over them. `Python` runs a taught snippet
+with a restricted set of builtins, and `Shell` runs a command. No search,
+page-reading, or transcription API key is needed. These are actions Soup takes
+when asked; they are separate from the automatic Wikidata fact source.
 
 ### Teaching it things
 
@@ -428,8 +469,62 @@ but cannot answer gets "i don't know what the time is"; blaming the speaker
 for a hole in your own vocabulary is the most annoying thing a program can
 do.
 
-The clock is the one thing Soup reads from outside its own memory, because
-"i don't know what time it is" is a silly answer.
+`Shell` runs whatever command reaches it, with an eight second timeout and no
+confirmation step. Fine on your own machine, while you are watching; not
+something to point at anything you care about.
+
+The clock is the one thing Soup reads from outside its own memory unasked,
+because "i don't know what time it is" is a silly answer.
 
 Memory is closed-world and flat. "does Bob like Alice" answers "i don't know"
 rather than "no", which is correct but chattier than people expect.
+
+## History
+
+Soup is the third of five related experiments in building an assistant whose
+knowledge lives in a graph it can read and grow, rather than in a model's
+weights:
+
+1. [EKG AI](https://github.com/KealJones/ekg-ai) (Aug 15 to 20, 2026):
+   typed executable programs, taught by an LLM Teacher.
+2. [Spoon](https://github.com/KealJones/spoon) (Aug 22 to Sep 9): EKG
+   renamed and rebuilt in Rust, ending as "everything is a Concept" with LLM
+   ears, mouth and Teacher.
+3. **Soup** (Sep 10 to 15): this repository.
+4. [Napkin](https://github.com/KealJones/napkin) (Sep 16 to Oct 17).
+5. [Noodle](https://github.com/KealJones/noodle) (Sep 29 to Oct 4).
+
+Soup started the day after Spoon's last commit, carrying Spoon's concept
+model into a much smaller Python codebase. Spoon's final experiment (Sep 9)
+had found that a 4B model reading sentences into concepts did far better
+writing Python-style calls, `add(2, 3)`, than angle brackets, `add<2, 3>`
+(46% against 18% on the same cases). Soup's concept expressions are Python
+calls from the first commit.
+
+- **Sep 10.** First commit: ears, realization, mouth and Teacher, with a
+  hand-written construction grammar doing the hearing and an optional local
+  model tried only for what the constructions missed. Relations became
+  concepts with properties instead of a closed enum. Fact questions went to
+  the model instead of to you, then to Wikidata first.
+- **Sep 11.** The construction grammar was deleted: `ears.py` went from 1,962
+  lines to 107, and a model became the only reader, from a seat with
+  `hear()`, `define()` and `answer()`. The model moved in-process so no server
+  was needed. Soup got a world: `Read`, `Write`, `Fetch`, `Url`, `Json`,
+  `GetProperty`.
+- **Sep 15.** The concept model grew: `Turn`, `Hear` and `Speak` became
+  concepts, `mouth.py` was deleted in favour of the seat choosing the words,
+  defining and answering got their own larger teacher model, and `Solve` started asking itself
+  before asking you. Web search, page reading, Wikipedia and transcription
+  arrived, Wikidata answers got labelled provenance, and the MMLU-Pro bench
+  harness was added. This was the last commit.
+
+A separate TypeScript version of Soup also existed outside this repository.
+That version is the one Napkin's architecture audit read on Sep 16; its
+verdict was that concepts owned their rewrite rules well, but native and
+effect code hid in closures that could not be inspected or saved, and the
+session ran a second execution path beside the evaluator. This repository is
+the Python one.
+
+Napkin, which followed, kept the idea that everything is a concept and pushed
+further on nothing being privileged, and it went the other way on the model:
+within nine days no model heard or spoke at all.
