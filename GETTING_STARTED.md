@@ -18,7 +18,7 @@ you     "is alice older than bob"
           v
         Answer(value=True, to=OlderThan(...))
           |
-        MOUTH         soup/mouth.py
+        SPEAK         Speak in soup/builtins.py (the seat picks the words)
           |
 you     "yeah, alice is older than bob"
 ```
@@ -311,11 +311,14 @@ wrong fact with a citation stapled to it. The P-id is kept as a fact, so
 `:facts` shows which property answered you and you can say it was the wrong
 one.
 
-### 6. Mouth
+### 6. Speaking
 
-`soup/mouth.py`. Concept structure in, casual English out. This end is
-supposed to be lossy. Soup's actual answer is the `Expr`; mouth is a renderer
-with opinions.
+The mouth is the `Speak` concept in `soup/builtins.py` (`soup/mouth.py` was
+deleted on Sep 15). Concept structure in, casual English out. Soup's actual
+answer is the `Expr`; `Speak` hands it to the seat's `speak()` and tells the
+model to add nothing. Text that came from a lookup is said as the source wrote
+it, and with no model the raw expression goes out. A style is a concept too:
+`Speak(of=X, style=Pirate())`.
 
 ### 7. Discourse
 
@@ -345,9 +348,8 @@ soup/
   builtins.py      starting vocabulary + native Python realizations
   realize.py       the resolver, Gap, Result, @native
   ears.py          English -> Expr (or parse Soup notation)
-  seat.py          hear / define / answer  (the model)
+  seat.py          hear / define / answer / speak  (the model)
   local.py         in-process MLX / llama.cpp
-  mouth.py         Expr -> English
   teacher.py       Gap -> Lesson -> Rule
   discourse.py     it / that / pending teach
   lookup.py        Wikidata fact-source glue over seeded concepts
